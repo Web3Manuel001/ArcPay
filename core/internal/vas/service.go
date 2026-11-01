@@ -42,7 +42,6 @@ func getFXRate(corridor string) (float64, string) {
 }
 
 func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*AirtimeReceipt, error) {
-	// 1. Resolve user's ArcTag
 	userIdentity, err := s.identityService.ResolveTag(ctx, req.SenderTag)
 	if err != nil {
 		return nil, fmt.Errorf("sender identity not found: %w", err)
@@ -53,32 +52,37 @@ func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*Air
 		return nil, fmt.Errorf("invalid airtime amount: %.2f", req.AmountUSDC)
 	}
 
-	// 2. Calculate local fiat amount for telco switch (e.g. "NGN 3300.00")
+	// Verify balance
+	userBal, err := s.ledgerService.GetBalance(ctx, userIdentity.AccountID)
+	if err != nil || userBal < amountUnits {
+		return nil, fmt.Errorf("insufficient balance for airtime top-up")
+	}
+
 	rate, currencySymbol := getFXRate(req.Corridor)
 	localValue := req.AmountUSDC * rate
 	localFormatted := fmt.Sprintf("%s %.2f", currencySymbol, localValue)
 
-	// 3. Atomic Double-Entry Ledger Settlement
+	// AIRTIME SPEND POLARITY:
+	// CREDIT User Asset (DEDUCTS from user's balance)
+	// DEBIT Treasury/Float Account (Balances ledger entry)
 	entry, err := s.ledgerService.ProcessTransaction(ctx, ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "VAS_AIRTIME",
 		Narration:      fmt.Sprintf("Airtime Recharge: %s %s to %s", req.Operator, localFormatted, req.PhoneNumber),
 		Corridor:       req.Corridor,
 		Postings: []ledger.PostingInstruction{
-			{AccountID: userIdentity.AccountID, AmountUnits: amountUnits, Direction: ledger.Debit},
-			{AccountID: s.treasuryAccount, AmountUnits: amountUnits, Direction: ledger.Credit},
+			{AccountID: userIdentity.AccountID, AmountUnits: amountUnits, Direction: ledger.Credit},
+			{AccountID: s.treasuryAccount, AmountUnits: amountUnits, Direction: ledger.Debit},
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ledger debit failed (insufficient funds): %w", err)
+		return nil, fmt.Errorf("ledger debit failed: %w", err)
 	}
 
-	// 4. Dispatch to Real Telecom API (Africa's Talking Switch)
 	var telcoStatus = "DELIVERED"
 	if s.atClient != nil {
 		telcoResp, err := s.atClient.DispatchAirtime(ctx, req.PhoneNumber, localFormatted)
 		if err != nil {
-			// In production, an alert triggers an automated reversal or support queue
 			return nil, fmt.Errorf("telco switch dispatch error: %w", err)
 		}
 		if len(telcoResp.Responses) > 0 && telcoResp.Responses[0].Status != "Sent" {

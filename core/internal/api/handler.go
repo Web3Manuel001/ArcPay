@@ -109,7 +109,6 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Lock on reference (30s lock)
 	acquired, err := h.redisClient.AcquireLock(r.Context(), reference, 30*time.Second)
 	if err != nil || !acquired {
 		Error(w, http.StatusConflict, "deposit already credited or currently verifying")
@@ -127,11 +126,9 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		amountNGN = float64(vResp.Data.Amount) / 100.0
 	}
 
-	// 2. Convert NGN to USDC (1 USDC = ₦1,650)
 	usdcAmount := amountNGN / 1650.0
 	units := int64(usdcAmount * 1_000_000)
 
-	// Clean token extraction: paystack_dep_{tag}_{timestamp}
 	parts := strings.Split(reference, "_")
 	var targetTag string
 	if len(parts) >= 3 {
@@ -149,6 +146,9 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 
 	inboundFloatID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
+	// DEPOSIT POLARITY:
+	// DEBIT User Asset Account (Increases user balance)
+	// CREDIT System Float Account (Balances the ledger)
 	_, err = h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: reference,
 		ReferenceType:  "PAYSTACK_DEPOSIT",
@@ -172,6 +172,74 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		"tag":           "$" + targetTag,
 		"credited_usdc": usdcAmount,
 		"new_balance":   float64(bal) / 1_000_000.0,
+	})
+}
+
+// --- SOCIAL P2P TRANSFER (CORRECTED POLARITY) ---
+
+func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
+	var req identity.TagTransferRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid transfer payload")
+		return
+	}
+
+	if req.IdempotencyKey == "" {
+		Error(w, http.StatusBadRequest, "idempotency_key is required")
+		return
+	}
+
+	sender, err := h.identityService.ResolveTag(r.Context(), req.SenderTag)
+	if err != nil {
+		Error(w, http.StatusNotFound, fmt.Sprintf("sender tag '%s' does not exist", req.SenderTag))
+		return
+	}
+
+	recipient, err := h.identityService.ResolveTag(r.Context(), req.RecipientTag)
+	if err != nil {
+		Error(w, http.StatusNotFound, fmt.Sprintf("recipient tag '%s' does not exist", req.RecipientTag))
+		return
+	}
+
+	// Verify sender has sufficient funds
+	senderBal, err := h.ledgerService.GetBalance(r.Context(), sender.AccountID)
+	if err != nil || senderBal < req.AmountUnits {
+		Error(w, http.StatusUnprocessableEntity, "insufficient balance to complete transfer")
+		return
+	}
+
+	acquired, err := h.redisClient.AcquireLock(r.Context(), req.IdempotencyKey, 10*time.Second)
+	if err != nil || !acquired {
+		Error(w, http.StatusConflict, "transaction locked or already executing")
+		return
+	}
+
+	// P2P POLARITY:
+	// CREDIT Sender Asset (DEDUCTS from sender's balance)
+	// DEBIT Recipient Asset (ADDS to recipient's balance)
+	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
+		IdempotencyKey: req.IdempotencyKey,
+		ReferenceType:  "TAG_TRANSFER",
+		Narration:      fmt.Sprintf("Transfer from $%s to $%s: %s", sender.ArcTag, recipient.ArcTag, req.Narration),
+		Corridor:       sender.Corridor,
+		Postings: []ledger.PostingInstruction{
+			{AccountID: sender.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Credit},
+			{AccountID: recipient.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Debit},
+		},
+	})
+	if err != nil {
+		_ = h.redisClient.ReleaseLock(r.Context(), req.IdempotencyKey)
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusCreated, map[string]any{
+		"journal_id":   entry.ID,
+		"from":         "$" + sender.ArcTag,
+		"to":           "$" + recipient.ArcTag,
+		"amount_usdc":  float64(req.AmountUnits) / 1_000_000.0,
+		"amount_units": req.AmountUnits,
+		"status":       "SETTLED",
 	})
 }
 
@@ -337,7 +405,7 @@ func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusCreated, receipt)
 }
 
-// --- SOCIAL IDENTITY HANDLERS ---
+// --- SOCIAL IDENTITY LOOKUPS ---
 
 func (h *Handler) RegisterTag(w http.ResponseWriter, r *http.Request) {
 	var req identity.RegisterTagRequest
@@ -363,62 +431,6 @@ func (h *Handler) ResolveTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	JSON(w, http.StatusOK, id)
-}
-
-func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
-	var req identity.TagTransferRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid transfer payload")
-		return
-	}
-
-	if req.IdempotencyKey == "" {
-		Error(w, http.StatusBadRequest, "idempotency_key is required")
-		return
-	}
-
-	sender, err := h.identityService.ResolveTag(r.Context(), req.SenderTag)
-	if err != nil {
-		Error(w, http.StatusNotFound, fmt.Sprintf("sender tag '%s' does not exist", req.SenderTag))
-		return
-	}
-
-	recipient, err := h.identityService.ResolveTag(r.Context(), req.RecipientTag)
-	if err != nil {
-		Error(w, http.StatusNotFound, fmt.Sprintf("recipient tag '%s' does not exist", req.RecipientTag))
-		return
-	}
-
-	acquired, err := h.redisClient.AcquireLock(r.Context(), req.IdempotencyKey, 10*time.Second)
-	if err != nil || !acquired {
-		Error(w, http.StatusConflict, "transaction locked or already executing")
-		return
-	}
-
-	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
-		IdempotencyKey: req.IdempotencyKey,
-		ReferenceType:  "TAG_TRANSFER",
-		Narration:      fmt.Sprintf("Transfer from $%s to $%s: %s", sender.ArcTag, recipient.ArcTag, req.Narration),
-		Corridor:       sender.Corridor,
-		Postings: []ledger.PostingInstruction{
-			{AccountID: sender.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Debit},
-			{AccountID: recipient.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Credit},
-		},
-	})
-	if err != nil {
-		_ = h.redisClient.ReleaseLock(r.Context(), req.IdempotencyKey)
-		Error(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-
-	JSON(w, http.StatusCreated, map[string]any{
-		"journal_id":   entry.ID,
-		"from":         "$" + sender.ArcTag,
-		"to":           "$" + recipient.ArcTag,
-		"amount_usdc":  float64(req.AmountUnits) / 1_000_000.0,
-		"amount_units": req.AmountUnits,
-		"status":       "SETTLED",
-	})
 }
 
 // --- BASIC LEDGER & POS HANDLERS ---
