@@ -14,7 +14,10 @@ import {
   RefreshCw 
 } from 'lucide-react';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
+// Automatically normalize URL so it always ends with /api/v1
+const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
+const cleanBase = rawEnv.replace(/\/+$/, '');
+const API_BASE = cleanBase.endsWith('/api/v1') ? cleanBase : `${cleanBase}/api/v1`;
 
 export default function ArcpayApp() {
   const [activeTab, setActiveTab] = useState<'wallet' | 'split' | 'airtime' | 'pos'>('wallet');
@@ -22,7 +25,6 @@ export default function ArcpayApp() {
   // User Profile State
   const [userTag, setUserTag] = useState('$alex');
   const [balanceUSD, setBalanceUSD] = useState<number>(245.50);
-  const [accountId, setAccountId] = useState<string>('');
 
   // P2P State
   const [recipientTag, setRecipientTag] = useState('');
@@ -56,8 +58,8 @@ export default function ArcpayApp() {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
       gain.gain.setValueAtTime(0.2, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
       osc.connect(gain);
@@ -69,13 +71,24 @@ export default function ArcpayApp() {
     }
   };
 
+  // Safe API caller that catches plain-text errors
+  const apiCall = async (endpoint: string, options: RequestInit) => {
+    const res = await fetch(`${API_BASE}${endpoint}`, options);
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Server returned HTTP ${res.status}: ${text.slice(0, 80)}`);
+    }
+  };
+
   // 1. Social P2P Transfer
   const handleTransfer = async () => {
     if (!recipientTag || !transferAmount) return;
     setTransferLoading(true);
     setTxSuccess(null);
     try {
-      const res = await fetch(`${API_BASE}/consumer/transfers/tag`, {
+      const data = await apiCall('/consumer/transfers/tag', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -86,7 +99,6 @@ export default function ArcpayApp() {
           narration: 'P2P Transfer via WebApp'
         })
       });
-      const data = await res.json();
       if (data.success) {
         setTxSuccess(`Sent $${transferAmount} to ${recipientTag}`);
         setBalanceUSD(prev => prev - parseFloat(transferAmount));
@@ -96,7 +108,7 @@ export default function ArcpayApp() {
         alert(data.error || 'Transfer failed');
       }
     } catch (err: any) {
-      alert('Error connecting to backend: ' + err.message);
+      alert(err.message);
     } finally {
       setTransferLoading(false);
     }
@@ -107,7 +119,7 @@ export default function ArcpayApp() {
     if (!jevPrompt) return;
     setSplitLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/consumer/split/create`, {
+      const data = await apiCall('/consumer/split/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -115,14 +127,13 @@ export default function ArcpayApp() {
           prompt: jevPrompt
         })
       });
-      const data = await res.json();
       if (data.success) {
         setActiveSplit(data.data);
       } else {
         alert(data.error || 'Failed to parse split');
       }
     } catch (err: any) {
-      alert('Error parsing split: ' + err.message);
+      alert(err.message);
     } finally {
       setSplitLoading(false);
     }
@@ -133,7 +144,7 @@ export default function ArcpayApp() {
     setAirtimeLoading(true);
     setAirtimeReceipt(null);
     try {
-      const res = await fetch(`${API_BASE}/consumer/vas/airtime`, {
+      const data = await apiCall('/consumer/vas/airtime', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -145,7 +156,6 @@ export default function ArcpayApp() {
           corridor: 'NG'
         })
       });
-      const data = await res.json();
       if (data.success) {
         setAirtimeReceipt(data.data);
         setBalanceUSD(prev => prev - parseFloat(airtimeAmount));
@@ -153,7 +163,7 @@ export default function ArcpayApp() {
         alert(data.error || 'Airtime purchase failed');
       }
     } catch (err: any) {
-      alert('Telco switch error: ' + err.message);
+      alert(err.message);
     } finally {
       setAirtimeLoading(false);
     }
@@ -163,7 +173,7 @@ export default function ArcpayApp() {
   const handleCreateInvoice = async () => {
     setPosPaid(false);
     try {
-      const res = await fetch(`${API_BASE}/business/pos/invoices`, {
+      const data = await apiCall('/business/pos/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -172,12 +182,10 @@ export default function ArcpayApp() {
           table_number: posTable
         })
       });
-      const data = await res.json();
       if (data.success) {
         const inv = data.data;
         setActiveInvoice(inv);
 
-        // Open live WebSocket for POS terminal
         if (wsRef.current) wsRef.current.close();
         const wsHost = API_BASE.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(`${wsHost}/business/pos/ws/${inv.id}`);
@@ -192,7 +200,7 @@ export default function ArcpayApp() {
         };
       }
     } catch (err: any) {
-      alert('POS terminal error: ' + err.message);
+      alert(err.message);
     }
   };
 
@@ -267,7 +275,7 @@ export default function ArcpayApp() {
                 value={recipientTag}
                 onChange={(e) => setRecipientTag(e.target.value)}
                 placeholder="$chidi or $lagosbistro"
-                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl px-4 py-3 text-sm font-mono text-white placeholder-zinc-700 focus:border-emerald-500/50 transition-colors"
+                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl px-4 py-3 text-sm font-mono text-white placeholder-zinc-700 focus:border-emerald-500/50"
               />
             </div>
 
@@ -278,7 +286,7 @@ export default function ArcpayApp() {
                 value={transferAmount}
                 onChange={(e) => setTransferAmount(e.target.value)}
                 placeholder="0.00"
-                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl px-4 py-3 text-sm font-mono text-white placeholder-zinc-700 focus:border-emerald-500/50 transition-colors"
+                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl px-4 py-3 text-sm font-mono text-white placeholder-zinc-700 focus:border-emerald-500/50"
               />
             </div>
 
@@ -318,7 +326,7 @@ export default function ArcpayApp() {
                 value={jevPrompt}
                 onChange={(e) => setJevPrompt(e.target.value)}
                 rows={3}
-                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-sm text-white placeholder-zinc-700 focus:border-emerald-500/50 transition-colors"
+                className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-sm text-white placeholder-zinc-700 focus:border-emerald-500/50"
               />
             </div>
 
@@ -474,7 +482,6 @@ export default function ArcpayApp() {
                 ) : (
                   <div className="space-y-3">
                     <div className="w-36 h-36 mx-auto bg-white rounded-xl p-2 flex items-center justify-center">
-                      {/* Dynamic QR Representation */}
                       <div className="w-full h-full border-4 border-dashed border-zinc-950 flex flex-col items-center justify-center text-zinc-950 font-mono text-[9px] text-center font-bold">
                         <span>SCAN TO PAY</span>
                         <span className="text-[8px] text-zinc-600 mt-1">{activeInvoice.id}</span>
