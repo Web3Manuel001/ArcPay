@@ -1,0 +1,17 @@
+# Secrets
+.env
+.env.*
+*.env
+**/.env
+
+# Logs
+*.log
+server.log
+
+# Build Outputs & Dependencies
+core/bin/
+bin/
+web/node_modules/
+web/.next/
+web/out/
+*.exe
