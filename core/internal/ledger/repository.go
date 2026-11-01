@@ -104,8 +104,8 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 	ensureSystemSQL := `
 		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
 		VALUES 
-			('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'GLOBAL', 'USDC', 'REVENUE', TRUE, NOW()),
-			('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'GLOBAL', 'USDC', 'EQUITY', TRUE, NOW())
+			('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'SYS', 'USDC', 'REVENUE', TRUE, NOW()),
+			('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'SYS', 'USDC', 'EQUITY', TRUE, NOW())
 		ON CONFLICT (id) DO NOTHING;
 	`
 	if _, err := tx.Exec(ctx, ensureSystemSQL); err != nil {
