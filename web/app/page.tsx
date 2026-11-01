@@ -14,7 +14,8 @@ import {
   ShieldCheck,
   LogOut,
   Lock,
-  PlusCircle
+  PlusCircle,
+  CreditCard
 } from 'lucide-react';
 
 const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
@@ -27,7 +28,7 @@ export default function ArcpayApp() {
   // Auth & Session State
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isLoginMode, setIsLoginMode] = useState(false); // Default to register for new testers
+  const [isLoginMode, setIsLoginMode] = useState(false);
 
   // Auth Form State
   const [authName, setAuthName] = useState('');
@@ -39,6 +40,11 @@ export default function ArcpayApp() {
   // Financial State
   const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
   const [faucetLoading, setFaucetLoading] = useState(false);
+
+  // Deposit State
+  const [depositAmountNGN, setDepositAmountNGN] = useState('16500');
+  const [depositLoading, setDepositLoading] = useState(false);
+  const [showDepositModal, setShowDepositModal] = useState(false);
 
   // P2P State
   const [recipientTag, setRecipientTag] = useState('');
@@ -72,6 +78,13 @@ export default function ArcpayApp() {
         const u = JSON.parse(saved);
         setCurrentUser(u);
         fetchBalance(u.account_id);
+
+        // Check if returning from Paystack redirect
+        const params = new URLSearchParams(window.location.search);
+        const ref = params.get('verify_ref') || params.get('reference');
+        if (ref) {
+          verifyPaystackDeposit(ref, u.account_id);
+        }
       } catch (e) {}
     } else {
       setShowAuthModal(true);
@@ -84,6 +97,18 @@ export default function ArcpayApp() {
       const data = await res.json();
       if (data.success) {
         setBalanceUSD(data.data.balance_amount);
+      }
+    } catch (e) {}
+  };
+
+  const verifyPaystackDeposit = async (ref: string, accountId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/consumer/deposit/verify/${ref}`);
+      const data = await res.json();
+      if (data.success) {
+        alert(`🎉 Deposit Successful! Credited $${data.data.credited_usdc} USDC`);
+        fetchBalance(accountId);
+        window.history.replaceState({}, document.title, window.location.pathname);
       }
     } catch (e) {}
   };
@@ -115,7 +140,33 @@ export default function ArcpayApp() {
     }
   };
 
-  // Claim Faucet Test Money ($100 USDC)
+  // Paystack Deposit Handler
+  const handlePaystackDeposit = async () => {
+    if (!currentUser) return;
+    setDepositLoading(true);
+    try {
+      const data = await apiCall('/consumer/deposit/initialize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tag: currentUser.arc_tag,
+          amount_ngn: parseFloat(depositAmountNGN)
+        })
+      });
+      if (data.success && data.data.authorization_url) {
+        // Redirect to Paystack Checkout Modal / URL
+        window.location.href = data.data.authorization_url;
+      } else {
+        alert(data.error || 'Failed to initialize deposit');
+      }
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setDepositLoading(false);
+    }
+  };
+
+  // Claim Faucet Test Money
   const handleClaimFaucet = async () => {
     if (!currentUser) return;
     setFaucetLoading(true);
@@ -172,17 +223,7 @@ export default function ArcpayApp() {
           setCurrentUser(data.data.user);
           localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
           setShowAuthModal(false);
-          // Automatically seed new user with $100 test money
-          try {
-            const fData = await apiCall('/consumer/faucet', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ tag: data.data.user.arc_tag })
-            });
-            if (fData.success) {
-              setBalanceUSD(fData.data.new_balance);
-            }
-          } catch (e) {}
+          fetchBalance(data.data.user.account_id);
         } else {
           alert(data.error || 'Registration failed');
         }
@@ -339,7 +380,7 @@ export default function ArcpayApp() {
                 {isLoginMode ? 'Welcome back' : 'Create Arcpay Account'}
               </h2>
               <p className="text-xs text-zinc-400">
-                {isLoginMode ? 'Enter your ArcTag or phone and PIN' : 'Instant onboarding · $100 test funds included'}
+                {isLoginMode ? 'Enter your ArcTag or phone and PIN' : 'Instant onboarding · Zero seed phrases'}
               </p>
             </div>
 
@@ -419,6 +460,55 @@ export default function ArcpayApp() {
         </div>
       )}
 
+      {/* DEPOSIT MODAL */}
+      {showDepositModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-surfaceBorder">
+              <div className="flex items-center gap-2">
+                <CreditCard className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-sm font-semibold text-white">Deposit via Paystack</h3>
+              </div>
+              <button 
+                onClick={() => setShowDepositModal(false)}
+                className="text-zinc-500 hover:text-white text-xs font-mono"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 font-mono text-xs">
+              <div>
+                <label className="text-[10px] text-zinc-500">AMOUNT IN NAIRA (NGN)</label>
+                <input
+                  type="number"
+                  value={depositAmountNGN}
+                  onChange={(e) => setDepositAmountNGN(e.target.value)}
+                  className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white focus:border-emerald-500/50"
+                />
+                <span className="text-[10px] text-emerald-400 mt-1 block">
+                  ≈ ${(parseFloat(depositAmountNGN || '0') / 1650).toFixed(2)} USDC credited
+                </span>
+              </div>
+
+              <div className="p-3 bg-zinc-950 rounded-xl border border-surfaceBorder text-[11px] text-zinc-400 space-y-1">
+                <div>⚡ Real sandbox payments (Card or Bank)</div>
+                <div>🔒 Funds settle directly into your Arcpay balance</div>
+              </div>
+
+              <button
+                onClick={handlePaystackDeposit}
+                disabled={depositLoading}
+                className="w-full bg-emerald-500 text-zinc-950 font-semibold py-3.5 rounded-xl text-xs flex items-center justify-center gap-2 hover:bg-emerald-400 transition-colors disabled:opacity-50"
+              >
+                {depositLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CreditCard className="w-4 h-4" />}
+                <span>Continue to Paystack (₦{depositAmountNGN})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Container */}
       <div>
         {/* Header */}
@@ -457,7 +547,7 @@ export default function ArcpayApp() {
           )}
         </div>
 
-        {/* Balance Card with Faucet Button */}
+        {/* Balance Card */}
         <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
           <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
             <span>Digital Dollar Balance</span>
@@ -474,17 +564,25 @@ export default function ArcpayApp() {
               <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
             </div>
 
-            {/* Test Faucet Trigger */}
+            {/* Deposit Actions */}
             {currentUser && (
-              <button
-                onClick={handleClaimFaucet}
-                disabled={faucetLoading}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono text-[11px] transition-colors disabled:opacity-50"
-                title="Claim $100 test USDC"
-              >
-                {faucetLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <PlusCircle className="w-3.5 h-3.5" />}
-                <span>+ $100 Test USD</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowDepositModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-white font-mono text-[11px] transition-colors"
+                >
+                  <CreditCard className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>+ Deposit NGN</span>
+                </button>
+                <button
+                  onClick={handleClaimFaucet}
+                  disabled={faucetLoading}
+                  className="p-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono text-[11px] transition-colors disabled:opacity-50"
+                  title="Claim $100 test USDC"
+                >
+                  {faucetLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <PlusCircle className="w-3.5 h-3.5" />}
+                </button>
+              </div>
             )}
           </div>
 

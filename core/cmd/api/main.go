@@ -17,12 +17,27 @@ import (
 	"github.com/arcpay/core/internal/identity"
 	"github.com/arcpay/core/internal/jev"
 	"github.com/arcpay/core/internal/ledger"
+	"github.com/arcpay/core/internal/paystack"
 	"github.com/arcpay/core/internal/pos"
 	"github.com/arcpay/core/internal/redis"
 	"github.com/arcpay/core/internal/split"
 	"github.com/arcpay/core/internal/vas"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ensureSystemAccounts guarantees system float/equity accounts exist on boot
+func ensureSystemAccounts(ctx context.Context, pool *pgxpool.Pool) error {
+	seedSQL := `
+		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
+		VALUES 
+			('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'GLOBAL', 'USDC', 'REVENUE', TRUE, NOW()),
+			('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'GLOBAL', 'USDC', 'EQUITY', TRUE, NOW())
+		ON CONFLICT (id) DO NOTHING;
+	`
+	_, err := pool.Exec(ctx, seedSQL)
+	return err
+}
 
 func main() {
 	log.Println("🚀 Initializing Arcpay Core Engine on Arc L1...")
@@ -37,6 +52,13 @@ func main() {
 		log.Fatalf("❌ Database connection error: %v", err)
 	}
 	defer pgPool.Close()
+
+	// Guarantee system accounts exist
+	if err := ensureSystemAccounts(ctx, pgPool); err != nil {
+		log.Printf("⚠️ Warning ensuring system accounts: %v", err)
+	} else {
+		log.Println("✓ Verified System Accounts (Treasury & Faucet Reserve)")
+	}
 
 	redisClient, err := redis.NewClient(cfg.RedisURL)
 	if err != nil {
@@ -54,7 +76,6 @@ func main() {
 	identityRepo := identity.NewRepository(pgPool)
 	identityService := identity.NewService(identityRepo)
 
-	// Auth & Tiered KYC Service
 	authService := auth.NewService(pgPool, ledgerService)
 	log.Println("✓ Progressive Auth & Tiered KYC Service Active")
 
@@ -65,13 +86,21 @@ func main() {
 		log.Println("✓ Real Telecom Switch Connected (Africa's Talking API)")
 	}
 
+	// Paystack Client
+	paystackKey := os.Getenv("PAYSTACK_SECRET_KEY")
+	var psClient *paystack.Client
+	if paystackKey != "" {
+		psClient = paystack.NewClient(paystackKey)
+		log.Println("✓ Paystack Sandbox Payment Gateway Connected")
+	}
+
 	treasuryAccount := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	vasService := vas.NewService(ledgerService, identityService, atClient, treasuryAccount)
 
 	jevEngine := jev.NewEngine()
 	splitService := split.NewService(pgPool, jevEngine, identityService, ledgerService, "https://arcpay.me")
 
-	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, redisClient, posHub)
+	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, psClient, redisClient, posHub)
 
 	router := api.NewRouter(httpHandler)
 	server := &http.Server{
