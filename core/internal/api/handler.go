@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/arcpay/core/internal/auth"
@@ -71,7 +72,6 @@ func (h *Handler) InitializeDeposit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanTag := identity.CleanTag(req.Tag)
-	// Check that the user tag actually exists
 	if _, err := h.identityService.ResolveTag(r.Context(), cleanTag); err != nil {
 		Error(w, http.StatusNotFound, "user not found: "+cleanTag)
 		return
@@ -109,6 +109,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. Lock on reference (30s lock)
 	acquired, err := h.redisClient.AcquireLock(r.Context(), reference, 30*time.Second)
 	if err != nil || !acquired {
 		Error(w, http.StatusConflict, "deposit already credited or currently verifying")
@@ -126,18 +127,23 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		amountNGN = float64(vResp.Data.Amount) / 100.0
 	}
 
+	// 2. Convert NGN to USDC (1 USDC = ₦1,650)
 	usdcAmount := amountNGN / 1650.0
 	units := int64(usdcAmount * 1_000_000)
 
+	// Clean token extraction: paystack_dep_{tag}_{timestamp}
+	parts := strings.Split(reference, "_")
 	var targetTag string
-	_, _ = fmt.Sscanf(reference, "paystack_dep_%s_", &targetTag)
-	if targetTag == "" {
-		targetTag = "alex"
+	if len(parts) >= 3 {
+		targetTag = parts[2]
+	} else {
+		targetTag = "emma"
 	}
 
 	user, err := h.identityService.ResolveTag(r.Context(), targetTag)
 	if err != nil {
-		Error(w, http.StatusNotFound, "user not found")
+		_ = h.redisClient.ReleaseLock(r.Context(), reference)
+		Error(w, http.StatusNotFound, "user not found: "+targetTag)
 		return
 	}
 
@@ -154,6 +160,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
+		_ = h.redisClient.ReleaseLock(r.Context(), reference)
 		Error(w, http.StatusInternalServerError, "ledger deposit failed: "+err.Error())
 		return
 	}
@@ -162,6 +169,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 
 	JSON(w, http.StatusOK, map[string]any{
 		"status":        "CREDITED",
+		"tag":           "$" + targetTag,
 		"credited_usdc": usdcAmount,
 		"new_balance":   float64(bal) / 1_000_000.0,
 	})
