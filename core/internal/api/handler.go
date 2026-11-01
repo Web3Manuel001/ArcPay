@@ -60,7 +60,7 @@ func NewHandler(
 
 type InitDepositRequest struct {
 	Tag       string  `json:"tag"`
-	AmountNGN float64 `json:"amount_ngn"` // in Naira (e.g. 5000)
+	AmountNGN float64 `json:"amount_ngn"`
 }
 
 func (h *Handler) InitializeDeposit(w http.ResponseWriter, r *http.Request) {
@@ -71,18 +71,16 @@ func (h *Handler) InitializeDeposit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanTag := identity.CleanTag(req.Tag)
-	user, err := h.identityService.ResolveTag(r.Context(), cleanTag)
-	if err != nil {
+	// Check that the user tag actually exists
+	if _, err := h.identityService.ResolveTag(r.Context(), cleanTag); err != nil {
 		Error(w, http.StatusNotFound, "user not found: "+cleanTag)
 		return
 	}
 
 	reference := fmt.Sprintf("paystack_dep_%s_%d", cleanTag, time.Now().Unix())
-	amountKobo := int64(req.AmountNGN * 100) // Paystack amounts are in kobo
-
+	amountKobo := int64(req.AmountNGN * 100)
 	callbackURL := "https://test-arcpay.vercel.app/?verify_ref=" + reference
 
-	// If Paystack client is initialized, call live API
 	if h.paystackClient != nil {
 		resp, err := h.paystackClient.InitializeTransaction(r.Context(), "user@arcpay.me", amountKobo, reference, callbackURL)
 		if err != nil {
@@ -97,7 +95,6 @@ func (h *Handler) InitializeDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fallback simulated instant deposit if no key configured
 	JSON(w, http.StatusOK, map[string]any{
 		"authorization_url": callbackURL,
 		"reference":         reference,
@@ -112,14 +109,13 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Lock on reference
 	acquired, err := h.redisClient.AcquireLock(r.Context(), reference, 30*time.Second)
 	if err != nil || !acquired {
 		Error(w, http.StatusConflict, "deposit already credited or currently verifying")
 		return
 	}
 
-	var amountNGN float64 = 16500.0 // Default 10 USDC equivalent
+	var amountNGN float64 = 16500.0
 	if h.paystackClient != nil {
 		vResp, err := h.paystackClient.VerifyTransaction(r.Context(), reference)
 		if err != nil || vResp.Data.Status != "success" {
@@ -130,12 +126,9 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		amountNGN = float64(vResp.Data.Amount) / 100.0
 	}
 
-	// 2. Convert NGN to USDC (1 USDC = ₦1,650)
 	usdcAmount := amountNGN / 1650.0
 	units := int64(usdcAmount * 1_000_000)
 
-	// Grab user tag from reference
-	// reference format: paystack_dep_{tag}_{timestamp}
 	var targetTag string
 	_, _ = fmt.Sscanf(reference, "paystack_dep_%s_", &targetTag)
 	if targetTag == "" {
@@ -168,9 +161,9 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 	bal, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
 
 	JSON(w, http.StatusOK, map[string]any{
-		"status":         "CREDITED",
-		"credited_usdc":  usdcAmount,
-		"new_balance":    float64(bal) / 1_000_000.0,
+		"status":        "CREDITED",
+		"credited_usdc": usdcAmount,
+		"new_balance":   float64(bal) / 1_000_000.0,
 	})
 }
 
@@ -194,7 +187,7 @@ func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const faucetAmount = 100_000_000 // 100 USDC
+	const faucetAmount = 100_000_000
 	faucetReserveID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
 	idempotencyKey := fmt.Sprintf("faucet_%s_%d", cleanTag, time.Now().UnixNano())
