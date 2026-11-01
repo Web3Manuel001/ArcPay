@@ -24,6 +24,8 @@ type SplitSession struct {
 	SharePerPersonUnits int64              `json:"share_per_person_units"`
 	TotalAmountUSD      float64            `json:"total_amount_usd"`
 	SharePerPersonUSD   float64            `json:"share_per_person_usd"`
+	TotalAmountNGN      float64            `json:"total_amount_ngn"`
+	SharePerPersonNGN   float64            `json:"share_per_person_ngn"`
 	Narration           string             `json:"narration"`
 	ShareableLink       string             `json:"shareable_link"`
 	Status              string             `json:"status"`
@@ -124,6 +126,7 @@ func (s *Service) CreateSplit(ctx context.Context, creatorTag string, rawInput s
 	}
 
 	shareableURL := fmt.Sprintf("%s/split/%s", s.baseURL, splitCode)
+	shareUSD := float64(shareUnits) / 1_000_000.0
 
 	return &SplitSession{
 		ID:                  sessionID,
@@ -132,7 +135,9 @@ func (s *Service) CreateSplit(ctx context.Context, creatorTag string, rawInput s
 		TotalAmountUnits:    totalUnits,
 		SharePerPersonUnits: shareUnits,
 		TotalAmountUSD:      intent.TotalAmountUSD,
-		SharePerPersonUSD:   float64(shareUnits) / 1_000_000.0,
+		SharePerPersonUSD:   shareUSD,
+		TotalAmountNGN:      intent.TotalAmountUSD * 1650.0,
+		SharePerPersonNGN:   shareUSD * 1650.0,
 		Narration:           intent.Narration,
 		ShareableLink:       shareableURL,
 		Status:              "OPEN",
@@ -141,49 +146,104 @@ func (s *Service) CreateSplit(ctx context.Context, creatorTag string, rawInput s
 	}, nil
 }
 
+func (s *Service) GetSplitByCode(ctx context.Context, splitCode string) (*SplitSession, error) {
+	query := `
+		SELECT id, split_code, creator_tag, total_amount_units, share_per_person_units, narration, status, created_at
+		FROM split_sessions
+		WHERE split_code = $1
+	`
+	var sess SplitSession
+	err := s.pool.QueryRow(ctx, query, splitCode).Scan(
+		&sess.ID, &sess.SplitCode, &sess.CreatorTag, &sess.TotalAmountUnits, 
+		&sess.SharePerPersonUnits, &sess.Narration, &sess.Status, &sess.CreatedAt,
+	)
+	if err != nil {
+		return nil, errors.New("split session not found")
+	}
+
+	sess.TotalAmountUSD = float64(sess.TotalAmountUnits) / 1_000_000.0
+	sess.SharePerPersonUSD = float64(sess.SharePerPersonUnits) / 1_000_000.0
+	sess.TotalAmountNGN = sess.TotalAmountUSD * 1650.0
+	sess.SharePerPersonNGN = sess.SharePerPersonUSD * 1650.0
+	sess.ShareableLink = fmt.Sprintf("%s/split/%s", s.baseURL, sess.SplitCode)
+
+	// Fetch participants
+	pQuery := `
+		SELECT id, COALESCE(participant_tag, ''), phone_or_email, amount_units, status, COALESCE(payment_method, '')
+		FROM split_participants
+		WHERE split_id = $1
+	`
+	rows, err := s.pool.Query(ctx, pQuery, sess.ID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var p SplitParticipant
+			_ = rows.Scan(&p.ID, &p.ParticipantTag, &p.PhoneOrEmail, &p.AmountUnits, &p.Status, &p.PaymentMethod)
+			sess.Participants = append(sess.Participants, p)
+		}
+	}
+
+	return &sess, nil
+}
+
 func (s *Service) PaySplitShare(ctx context.Context, splitCode, payerIdentifier, paymentMethod string) error {
-	var sessionID uuid.UUID
-	var creatorTag string
-	var shareUnits int64
-	var status string
-
-	query := `SELECT id, creator_tag, share_per_person_units, status FROM split_sessions WHERE split_code = $1`
-	err := s.pool.QueryRow(ctx, query, splitCode).Scan(&sessionID, &creatorTag, &shareUnits, &status)
+	sess, err := s.GetSplitByCode(ctx, splitCode)
 	if err != nil {
-		return errors.New("split session not found")
+		return err
 	}
-	if status != "OPEN" {
-		return errors.New("split session is already closed or completed")
+	if sess.Status != "OPEN" {
+		return errors.New("split session is closed")
 	}
 
-	creator, err := s.identityService.ResolveTag(ctx, creatorTag)
+	creator, err := s.identityService.ResolveTag(ctx, sess.CreatorTag)
 	if err != nil {
-		return fmt.Errorf("creator account unresolvable: %w", err)
+		return fmt.Errorf("creator unresolvable: %w", err)
 	}
 
 	if paymentMethod == "ARCPAY_BALANCE" {
 		payerTag := identity.CleanTag(payerIdentifier)
 		payer, err := s.identityService.ResolveTag(ctx, payerTag)
 		if err != nil {
-			return fmt.Errorf("payer ArcTag not found: %w", err)
+			return fmt.Errorf("payer not found: %w", err)
+		}
+
+		payerBal, _ := s.ledgerService.GetBalance(ctx, payer.AccountID)
+		if payerBal < sess.SharePerPersonUnits {
+			return errors.New("insufficient balance")
 		}
 
 		idempotencyKey := fmt.Sprintf("split_pay_%s_%s", splitCode, payerTag)
 		_, err = s.ledgerService.ProcessTransaction(ctx, ledger.TransactionPayload{
 			IdempotencyKey: idempotencyKey,
 			ReferenceType:  "ARC_SPLIT",
-			Narration:      fmt.Sprintf("ArcSplit Payment for %s", splitCode),
+			Narration:      fmt.Sprintf("Split payment for %s", splitCode),
 			Corridor:       creator.Corridor,
 			Postings: []ledger.PostingInstruction{
-				{AccountID: payer.AccountID, AmountUnits: shareUnits, Direction: ledger.Debit},
-				{AccountID: creator.AccountID, AmountUnits: shareUnits, Direction: ledger.Credit},
+				{AccountID: payer.AccountID, AmountUnits: sess.SharePerPersonUnits, Direction: ledger.Debit},
+				{AccountID: creator.AccountID, AmountUnits: sess.SharePerPersonUnits, Direction: ledger.Credit},
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("balance settlement failed: %w", err)
+			return err
 		}
 	} else {
-		log.Printf("💳 Web2 Payment Received (%s): %d units credited to $%s", paymentMethod, shareUnits, creatorTag)
+		// External Web2 Card / Paystack
+		inboundFloatID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+		idempotencyKey := fmt.Sprintf("split_ps_%s_%d", splitCode, time.Now().UnixNano())
+		_, err = s.ledgerService.ProcessTransaction(ctx, ledger.TransactionPayload{
+			IdempotencyKey: idempotencyKey,
+			ReferenceType:  "ARC_SPLIT_PAYSTACK",
+			Narration:      fmt.Sprintf("Paystack Card Split for %s", splitCode),
+			Corridor:       creator.Corridor,
+			Postings: []ledger.PostingInstruction{
+				{AccountID: creator.AccountID, AmountUnits: sess.SharePerPersonUnits, Direction: ledger.Credit},
+				{AccountID: inboundFloatID, AmountUnits: sess.SharePerPersonUnits, Direction: ledger.Debit},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		log.Printf("💳 Paystack Split Settled: %d units credited to $%s", sess.SharePerPersonUnits, sess.CreatorTag)
 	}
 
 	updateSQL := `
@@ -191,7 +251,7 @@ func (s *Service) PaySplitShare(ctx context.Context, splitCode, payerIdentifier,
 		SET status = 'PAID', payment_method = $1, paid_at = NOW() 
 		WHERE split_id = $2 AND (participant_tag = $3 OR phone_or_email = $3)
 	`
-	_, _ = s.pool.Exec(ctx, updateSQL, paymentMethod, sessionID, identity.CleanTag(payerIdentifier))
+	_, _ = s.pool.Exec(ctx, updateSQL, paymentMethod, sess.ID, identity.CleanTag(payerIdentifier))
 
 	return nil
 }

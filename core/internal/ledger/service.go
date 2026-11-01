@@ -42,7 +42,10 @@ func (s *Service) GetBalance(ctx context.Context, accountID uuid.UUID) (int64, e
 	return s.repo.GetBalance(ctx, accountID)
 }
 
-// ProcessTransaction enforces the mathematical accounting invariant: SUM(Debits) == SUM(Credits)
+func (s *Service) GetHistory(ctx context.Context, accountID uuid.UUID, limit int) ([]HistoryItem, error) {
+	return s.repo.GetHistory(ctx, accountID, limit)
+}
+
 func (s *Service) ProcessTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error) {
 	if len(payload.Postings) < 2 {
 		return nil, ErrZeroPostings
@@ -64,7 +67,6 @@ func (s *Service) ProcessTransaction(ctx context.Context, payload TransactionPay
 		}
 	}
 
-	// Invariant check: In accounting, money cannot appear from thin air
 	if totalDebits != totalCredits {
 		return nil, fmt.Errorf("%w: debits=%d, credits=%d", ErrUnbalancedTransaction, totalDebits, totalCredits)
 	}

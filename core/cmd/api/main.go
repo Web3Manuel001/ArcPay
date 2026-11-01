@@ -98,7 +98,7 @@ func main() {
 	vasService := vas.NewService(ledgerService, identityService, atClient, treasuryAccount)
 
 	jevEngine := jev.NewEngine()
-	splitService := split.NewService(pgPool, jevEngine, identityService, ledgerService, "https://arcpay.me")
+	splitService := split.NewService(pgPool, jevEngine, identityService, ledgerService, "https://test-arcpay.vercel.app")
 
 	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, psClient, redisClient, posHub)
 

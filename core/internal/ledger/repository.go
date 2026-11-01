@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -15,10 +16,21 @@ var (
 	ErrAccountNotFound      = errors.New("account not found or inactive")
 )
 
+type HistoryItem struct {
+	ID            uuid.UUID `json:"id"`
+	ReferenceType string    `json:"reference_type"`
+	Narration     string    `json:"narration"`
+	AmountUnits   int64     `json:"amount_units"`
+	AmountUSD     float64   `json:"amount_usd"`
+	Direction     Direction `json:"direction"` // CREDIT = Money In (+), DEBIT = Money Out (-)
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 type Repository interface {
 	CreateAccount(ctx context.Context, acc *Account) error
 	GetAccount(ctx context.Context, id uuid.UUID) (*Account, error)
 	GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
+	GetHistory(ctx context.Context, accountID uuid.UUID, limit int) ([]HistoryItem, error)
 	RecordTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error)
 }
 
@@ -62,7 +74,6 @@ func (r *PostgresRepository) GetAccount(ctx context.Context, id uuid.UUID) (*Acc
 	return &acc, nil
 }
 
-// Universal Fintech Balance: Credits (In) - Debits (Out)
 func (r *PostgresRepository) GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error) {
 	query := `
 		SELECT 
@@ -83,6 +94,33 @@ func (r *PostgresRepository) GetBalance(ctx context.Context, accountID uuid.UUID
 	return netBalance, nil
 }
 
+func (r *PostgresRepository) GetHistory(ctx context.Context, accountID uuid.UUID, limit int) ([]HistoryItem, error) {
+	query := `
+		SELECT j.id, j.reference_type, j.narration, p.amount_units, p.direction, j.created_at
+		FROM postings p
+		JOIN journal_entries j ON p.journal_entry_id = j.id
+		WHERE p.account_id = $1
+		ORDER BY j.created_at DESC
+		LIMIT $2
+	`
+	rows, err := r.pool.Query(ctx, query, accountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []HistoryItem
+	for rows.Next() {
+		var item HistoryItem
+		if err := rows.Scan(&item.ID, &item.ReferenceType, &item.Narration, &item.AmountUnits, &item.Direction, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.AmountUSD = float64(item.AmountUnits) / 1_000_000.0
+		items = append(items, item)
+	}
+	return items, nil
+}
+
 func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -90,7 +128,6 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 	}
 	defer tx.Rollback(ctx)
 
-	// Ensure system reserve accounts exist inside this transaction
 	ensureSystemSQL := `
 		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
 		VALUES 

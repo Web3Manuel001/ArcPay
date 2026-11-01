@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   ArrowUpRight, 
+  ArrowDownLeft,
   Split, 
   Smartphone, 
   Store, 
@@ -15,7 +16,9 @@ import {
   LogOut,
   Lock,
   Plus,
-  CreditCard
+  CreditCard,
+  Share2,
+  X
 } from 'lucide-react';
 
 const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
@@ -39,8 +42,13 @@ export default function ArcpayApp() {
 
   // Financial State
   const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
+  const [history, setHistory] = useState<any[]>([]);
 
-  // Deposit State (Paystack Only)
+  // Modals & Receipts
+  const [selectedReceipt, setSelectedReceipt] = useState<any>(null);
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  // Deposit State
   const [depositAmountNGN, setDepositAmountNGN] = useState('16500');
   const [depositLoading, setDepositLoading] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
@@ -49,7 +57,6 @@ export default function ArcpayApp() {
   const [recipientTag, setRecipientTag] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
   const [transferLoading, setTransferLoading] = useState(false);
-  const [txSuccess, setTxSuccess] = useState<string | null>(null);
 
   // ArcSplit State
   const [jevPrompt, setJevPrompt] = useState('Split $60 with @chidi and @kofi for dinner at RSVP');
@@ -61,7 +68,6 @@ export default function ArcpayApp() {
   const [airtimeOperator, setAirtimeOperator] = useState('MTN');
   const [airtimeAmount, setAirtimeAmount] = useState('2.00');
   const [airtimeLoading, setAirtimeLoading] = useState(false);
-  const [airtimeReceipt, setAirtimeReceipt] = useState<any>(null);
 
   // POS State
   const [posAmount, setPosAmount] = useState('15.00');
@@ -70,15 +76,22 @@ export default function ArcpayApp() {
   const [posPaid, setPosPaid] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Auto-toast dismiss
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+    setToastMessage({ text, type });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  // Load User & Auto-Refresh Balance
   useEffect(() => {
     const saved = localStorage.getItem('arcpay_user');
     if (saved) {
       try {
         const u = JSON.parse(saved);
         setCurrentUser(u);
-        fetchBalance(u.account_id);
+        fetchBalanceAndHistory(u.account_id);
 
-        // Check if returning from Paystack redirect callback
+        // Check Paystack Callback
         const params = new URLSearchParams(window.location.search);
         const ref = params.get('verify_ref') || params.get('reference');
         if (ref) {
@@ -90,12 +103,28 @@ export default function ArcpayApp() {
     }
   }, []);
 
-  const fetchBalance = async (accountId: string) => {
+  // 5-second Polling Loop for Live Balance & History
+  useEffect(() => {
+    if (!currentUser) return;
+    const interval = setInterval(() => {
+      fetchBalanceAndHistory(currentUser.account_id);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
+  const fetchBalanceAndHistory = async (accountId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/accounts/${accountId}/balance`);
-      const data = await res.json();
-      if (data.success) {
-        setBalanceUSD(data.data.balance_amount);
+      // Balance
+      const bRes = await fetch(`${API_BASE}/accounts/${accountId}/balance`);
+      const bData = await bRes.json();
+      if (bData.success) {
+        setBalanceUSD(bData.data.balance_amount);
+      }
+      // History
+      const hRes = await fetch(`${API_BASE}/accounts/${accountId}/history`);
+      const hData = await hRes.json();
+      if (hData.success) {
+        setHistory(hData.data || []);
       }
     } catch (e) {}
   };
@@ -105,8 +134,8 @@ export default function ArcpayApp() {
       const res = await fetch(`${API_BASE}/consumer/deposit/verify/${ref}`);
       const data = await res.json();
       if (data.success) {
-        alert(`🎉 Deposit Confirmed! Credited $${data.data.credited_usdc.toFixed(2)} USDC to your balance!`);
-        fetchBalance(accountId);
+        showToast(`🎉 Deposit Confirmed! Credited $${data.data.credited_usdc.toFixed(2)} USDC`);
+        fetchBalanceAndHistory(accountId);
         window.history.replaceState({}, document.title, window.location.pathname);
       }
     } catch (e) {}
@@ -139,7 +168,7 @@ export default function ArcpayApp() {
     }
   };
 
-  // Paystack Deposit Handler
+  // Paystack Deposit
   const handlePaystackDeposit = async () => {
     if (!currentUser) return;
     setDepositLoading(true);
@@ -155,10 +184,10 @@ export default function ArcpayApp() {
       if (data.success && data.data.authorization_url) {
         window.location.href = data.data.authorization_url;
       } else {
-        alert(data.error || 'Failed to initialize Paystack deposit');
+        showToast(data.error || 'Failed to initialize deposit', 'error');
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     } finally {
       setDepositLoading(false);
     }
@@ -179,9 +208,10 @@ export default function ArcpayApp() {
           setCurrentUser(data.data.user);
           localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
           setShowAuthModal(false);
-          fetchBalance(data.data.user.account_id);
+          fetchBalanceAndHistory(data.data.user.account_id);
+          showToast(`Welcome back, ${data.data.user.arc_tag}`);
         } else {
-          alert(data.error || 'Login failed');
+          showToast(data.error || 'Login failed', 'error');
         }
       } else {
         const data = await apiCall('/auth/register', {
@@ -199,13 +229,14 @@ export default function ArcpayApp() {
           setCurrentUser(data.data.user);
           localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
           setShowAuthModal(false);
-          setBalanceUSD(0.00); // Clean 0 balance on registration - must deposit via Paystack
+          setBalanceUSD(0.00);
+          showToast(`Account created! Welcome ${data.data.user.arc_tag}`);
         } else {
-          alert(data.error || 'Registration failed');
+          showToast(data.error || 'Registration failed', 'error');
         }
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     } finally {
       setAuthLoading(false);
     }
@@ -221,7 +252,6 @@ export default function ArcpayApp() {
   const handleTransfer = async () => {
     if (!currentUser || !recipientTag || !transferAmount) return;
     setTransferLoading(true);
-    setTxSuccess(null);
     try {
       const data = await apiCall('/consumer/transfers/tag', {
         method: 'POST',
@@ -235,15 +265,23 @@ export default function ArcpayApp() {
         })
       });
       if (data.success) {
-        setTxSuccess(`Sent $${transferAmount} to ${recipientTag}`);
+        showToast(`Sent $${transferAmount} to ${recipientTag}`);
+        setSelectedReceipt({
+          title: 'P2P Transfer',
+          amountUSD: parseFloat(transferAmount),
+          narration: `Sent to ${recipientTag}`,
+          reference: data.data.journal_id,
+          date: new Date().toLocaleString(),
+          isDebit: true
+        });
         setTransferAmount('');
         setRecipientTag('');
-        fetchBalance(currentUser.account_id);
+        fetchBalanceAndHistory(currentUser.account_id);
       } else {
-        alert(data.error || 'Transfer failed');
+        showToast(data.error || 'Transfer failed', 'error');
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     } finally {
       setTransferLoading(false);
     }
@@ -264,11 +302,12 @@ export default function ArcpayApp() {
       });
       if (data.success) {
         setActiveSplit(data.data);
+        showToast('ArcSplit link created!');
       } else {
-        alert(data.error || 'Failed to parse split');
+        showToast(data.error || 'Failed to parse split', 'error');
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     } finally {
       setSplitLoading(false);
     }
@@ -278,7 +317,6 @@ export default function ArcpayApp() {
   const handleBuyAirtime = async () => {
     if (!currentUser) return;
     setAirtimeLoading(true);
-    setAirtimeReceipt(null);
     try {
       const data = await apiCall('/consumer/vas/airtime', {
         method: 'POST',
@@ -293,13 +331,21 @@ export default function ArcpayApp() {
         })
       });
       if (data.success) {
-        setAirtimeReceipt(data.data);
-        fetchBalance(currentUser.account_id);
+        showToast(`Airtime sent to ${airtimePhone}!`);
+        setSelectedReceipt({
+          title: 'Airtime Recharge',
+          amountUSD: parseFloat(airtimeAmount),
+          narration: `${airtimeOperator} Airtime to ${airtimePhone}`,
+          reference: data.data.journal_entry_id,
+          date: new Date().toLocaleString(),
+          isDebit: true
+        });
+        fetchBalanceAndHistory(currentUser.account_id);
       } else {
-        alert(data.error || 'Airtime purchase failed');
+        showToast(data.error || 'Airtime purchase failed', 'error');
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     } finally {
       setAirtimeLoading(false);
     }
@@ -333,17 +379,84 @@ export default function ArcpayApp() {
           if (payload.status === 'PAID') {
             setPosPaid(true);
             playPOSChime();
-            fetchBalance(currentUser.account_id);
+            showToast('POS Payment Settled!');
+            fetchBalanceAndHistory(currentUser.account_id);
           }
         };
       }
     } catch (err: any) {
-      alert(err.message);
+      showToast(err.message, 'error');
     }
   };
 
   return (
-    <div className="max-w-md mx-auto min-h-screen px-4 py-8 flex flex-col justify-between">
+    <div className="max-w-md mx-auto min-h-screen px-4 py-8 flex flex-col justify-between font-sans">
+      {/* IN-APP TOAST */}
+      {toastMessage && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl text-xs font-mono shadow-lg border transition-all ${
+          toastMessage.type === 'success' 
+            ? 'bg-zinc-900 border-emerald-500/50 text-emerald-400' 
+            : 'bg-zinc-900 border-red-500/50 text-red-400'
+        }`}>
+          {toastMessage.text}
+        </div>
+      )}
+
+      {/* RECEIPT MODAL */}
+      {selectedReceipt && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-surfaceBorder">
+              <span className="text-xs font-mono text-zinc-500">TRANSACTION RECEIPT</span>
+              <button onClick={() => setSelectedReceipt(null)} className="text-zinc-500 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="text-center py-2 space-y-1">
+              <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 mx-auto flex items-center justify-center font-bold">
+                ✓
+              </div>
+              <div className="text-2xl font-mono font-bold text-white">
+                {selectedReceipt.isDebit ? '-' : '+'}${selectedReceipt.amountUSD.toFixed(2)} USDC
+              </div>
+              <div className="text-xs font-mono text-zinc-500">
+                ≈ ₦{(selectedReceipt.amountUSD * 1650).toLocaleString()} NGN
+              </div>
+            </div>
+
+            <div className="p-3 bg-zinc-950 rounded-xl border border-surfaceBorder font-mono text-xs space-y-2">
+              <div className="flex justify-between text-zinc-400">
+                <span>Description:</span>
+                <span className="text-white text-right max-w-[180px] truncate">{selectedReceipt.narration}</span>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>Date & Time:</span>
+                <span className="text-white">{selectedReceipt.date}</span>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>Network:</span>
+                <span className="text-emerald-400">Circle Arc L1</span>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>Status:</span>
+                <span className="text-white">SETTLED (FINAL)</span>
+              </div>
+            </div>
+
+            <a
+              href={`https://wa.me/?text=${encodeURIComponent(`Receipt from Arcpay: ${selectedReceipt.narration} of $${selectedReceipt.amountUSD.toFixed(2)} USDC (Settled on Arc L1). Ref: ${selectedReceipt.reference}`)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="w-full bg-emerald-500 text-zinc-950 font-semibold py-3 rounded-xl text-xs flex items-center justify-center gap-2 hover:bg-emerald-400 transition-colors"
+            >
+              <Share2 className="w-4 h-4" />
+              <span>Share to WhatsApp</span>
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* AUTH MODAL */}
       {showAuthModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -436,7 +549,7 @@ export default function ArcpayApp() {
         </div>
       )}
 
-      {/* PAYSTACK DEPOSIT MODAL */}
+      {/* DEPOSIT MODAL */}
       {showDepositModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
@@ -445,10 +558,7 @@ export default function ArcpayApp() {
                 <CreditCard className="w-4 h-4 text-emerald-400" />
                 <h3 className="text-sm font-semibold text-white">Deposit via Paystack</h3>
               </div>
-              <button 
-                onClick={() => setShowDepositModal(false)}
-                className="text-zinc-500 hover:text-white text-xs font-mono"
-              >
+              <button onClick={() => setShowDepositModal(false)} className="text-zinc-500 hover:text-white text-xs font-mono">
                 ✕
               </button>
             </div>
@@ -464,7 +574,6 @@ export default function ArcpayApp() {
                 />
               </div>
 
-              {/* Quick Select Buttons */}
               <div className="grid grid-cols-3 gap-2">
                 {['5000', '16500', '50000'].map((amt) => (
                   <button
@@ -516,7 +625,7 @@ export default function ArcpayApp() {
               ₳
             </div>
             <div>
-              <h1 className="text-sm font-semibold tracking-tight">ARCPAY</h1>
+              <h1 className="text-sm font-semibold tracking-tight text-white">ARCPAY</h1>
               <p className="text-[10px] text-zinc-500 font-mono tracking-wider">SETTLED ON ARC L1</p>
             </div>
           </div>
@@ -527,11 +636,7 @@ export default function ArcpayApp() {
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span className="text-xs font-mono font-medium text-zinc-300">{currentUser.arc_tag}</span>
               </div>
-              <button 
-                onClick={handleLogout}
-                className="p-1.5 text-zinc-500 hover:text-white"
-                title="Log out"
-              >
+              <button onClick={handleLogout} className="p-1.5 text-zinc-500 hover:text-white" title="Log out">
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
@@ -545,7 +650,7 @@ export default function ArcpayApp() {
           )}
         </div>
 
-        {/* Balance Card (Paystack Only Deposit) */}
+        {/* Balance Card */}
         <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
           <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
             <span>Digital Dollar Balance</span>
@@ -562,7 +667,6 @@ export default function ArcpayApp() {
               <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
             </div>
 
-            {/* Clean Paystack Deposit Action */}
             {currentUser && (
               <button
                 onClick={() => setShowDepositModal(true)}
@@ -641,13 +745,6 @@ export default function ArcpayApp() {
               {transferLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               <span>Send Instantly</span>
             </button>
-
-            {txSuccess && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>{txSuccess}</span>
-              </div>
-            )}
           </div>
         )}
 
@@ -697,7 +794,10 @@ export default function ArcpayApp() {
                   <div className="flex items-center justify-between bg-zinc-900 p-2.5 rounded-lg border border-zinc-800 text-zinc-300">
                     <span className="truncate">{activeSplit.shareable_link}</span>
                     <button 
-                      onClick={() => navigator.clipboard.writeText(activeSplit.shareable_link)}
+                      onClick={() => {
+                        navigator.clipboard.writeText(activeSplit.shareable_link);
+                        showToast('Link copied to clipboard!');
+                      }}
                       className="ml-2 text-zinc-400 hover:text-white"
                     >
                       <Copy className="w-3.5 h-3.5" />
@@ -759,15 +859,6 @@ export default function ArcpayApp() {
               {airtimeLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Smartphone className="w-4 h-4" />}
               <span>Dispatch Airtime Switch</span>
             </button>
-
-            {airtimeReceipt && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono space-y-1">
-                <div className="font-bold flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Telco Dispatch Delivered!
-                </div>
-                <div>Delivered: {airtimeReceipt.local_amount} to {airtimeReceipt.phone_number}</div>
-              </div>
-            )}
           </div>
         )}
 
@@ -839,6 +930,65 @@ export default function ArcpayApp() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TRANSACTION HISTORY FEED */}
+        {currentUser && (
+          <div className="mt-8 space-y-3">
+            <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+              <span className="uppercase tracking-wider">Activity Feed</span>
+              <span className="text-[10px] text-zinc-600">LIVE AUTO-SYNC</span>
+            </div>
+
+            {history.length === 0 ? (
+              <div className="p-6 text-center text-xs font-mono text-zinc-600 border border-surfaceBorder rounded-2xl bg-surface">
+                No transactions yet. Add money or send to get started.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {history.map((tx) => {
+                  const isCredit = tx.direction === 'CREDIT';
+                  return (
+                    <div
+                      key={tx.id}
+                      onClick={() => setSelectedReceipt({
+                        title: tx.reference_type,
+                        amountUSD: tx.amount_usd,
+                        narration: tx.narration,
+                        reference: tx.id,
+                        date: new Date(tx.created_at).toLocaleString(),
+                        isDebit: !isCredit
+                      })}
+                      className="p-3.5 bg-surface hover:bg-zinc-900 border border-surfaceBorder rounded-xl flex items-center justify-between cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                          isCredit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-300'
+                        }`}>
+                          {isCredit ? <ArrowDownLeft className="w-4 h-4" /> : <ArrowUpRight className="w-4 h-4" />}
+                        </div>
+                        <div>
+                          <div className="text-xs font-medium text-white max-w-[160px] truncate">{tx.narration}</div>
+                          <div className="text-[10px] font-mono text-zinc-500">{new Date(tx.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <div className={`text-xs font-mono font-bold ${
+                          isCredit ? 'text-emerald-400' : 'text-white'
+                        }`}>
+                          {isCredit ? '+' : '-'}${tx.amount_usd.toFixed(2)}
+                        </div>
+                        <div className="text-[10px] font-mono text-zinc-500">
+                          {isCredit ? 'CREDIT' : 'DEBIT'}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

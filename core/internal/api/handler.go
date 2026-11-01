@@ -57,7 +57,110 @@ func NewHandler(
 	}
 }
 
-// --- PAYSTACK NAIRA DEPOSIT HANDLERS ---
+// --- HISTORY & BALANCE ---
+
+func (h *Handler) GetAccountHistory(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	accountID, err := uuid.Parse(idStr)
+	if err != nil {
+		Error(w, http.StatusBadRequest, "invalid account uuid")
+		return
+	}
+
+	items, err := h.ledgerService.GetHistory(r.Context(), accountID, 20)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusOK, items)
+}
+
+func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	accountID, err := uuid.Parse(idStr)
+	if err != nil {
+		Error(w, http.StatusBadRequest, "invalid account uuid")
+		return
+	}
+
+	balanceUnits, err := h.ledgerService.GetBalance(r.Context(), accountID)
+	if err != nil {
+		Error(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	if balanceUnits < 0 {
+		balanceUnits = 0
+	}
+
+	JSON(w, http.StatusOK, map[string]any{
+		"account_id":     accountID,
+		"balance_units":  balanceUnits,
+		"balance_amount": float64(balanceUnits) / 1_000_000.0,
+		"currency":       "USDC",
+	})
+}
+
+// --- ARCSPLIT HANDLERS ---
+
+type CreateSplitRequest struct {
+	CreatorTag string `json:"creator_tag"`
+	Prompt     string `json:"prompt"`
+}
+
+func (h *Handler) CreateSplitSession(w http.ResponseWriter, r *http.Request) {
+	var req CreateSplitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid split request payload")
+		return
+	}
+
+	session, err := h.splitService.CreateSplit(r.Context(), req.CreatorTag, req.Prompt)
+	if err != nil {
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusCreated, session)
+}
+
+func (h *Handler) GetSplitSession(w http.ResponseWriter, r *http.Request) {
+	code := chi.URLParam(r, "code")
+	sess, err := h.splitService.GetSplitByCode(r.Context(), code)
+	if err != nil {
+		Error(w, http.StatusNotFound, "split session not found")
+		return
+	}
+	JSON(w, http.StatusOK, sess)
+}
+
+type PaySplitRequest struct {
+	PayerIdentifier string `json:"payer_identifier"`
+	PaymentMethod   string `json:"payment_method"`
+}
+
+func (h *Handler) PaySplitShare(w http.ResponseWriter, r *http.Request) {
+	splitCode := chi.URLParam(r, "code")
+	var req PaySplitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid pay payload")
+		return
+	}
+
+	err := h.splitService.PaySplitShare(r.Context(), splitCode, req.PayerIdentifier, req.PaymentMethod)
+	if err != nil {
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusOK, map[string]string{
+		"status":  "PAID",
+		"message": "Share successfully settled to creator's balance",
+	})
+}
+
+// --- PAYSTACK NAIRA DEPOSIT ---
 
 type InitDepositRequest struct {
 	Tag       string  `json:"tag"`
@@ -137,7 +240,6 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 	units := int64(usdcAmount * 1_000_000)
 	inboundFloatID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
-	// DEPOSIT: User is CREDITED (+) and Float is DEBITED (-)
 	_, err = h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: reference,
 		ReferenceType:  "PAYSTACK_DEPOSIT",
@@ -173,7 +275,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- SOCIAL P2P TRANSFER (BANKING POLARITY + NEVER-NEGATIVE GUARD) ---
+// --- SOCIAL P2P TRANSFER ---
 
 func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 	var req identity.TagTransferRequest
@@ -208,7 +310,6 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// STRICT FINTECH GUARD: Verify sender has enough funds before touching ledger
 	senderBal, err := h.ledgerService.GetBalance(r.Context(), sender.AccountID)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "failed to check sender balance")
@@ -227,9 +328,6 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// BANKING POLARITY:
-	// DEBIT Sender (Deducts: balance goes DOWN)
-	// CREDIT Recipient (Adds: balance goes UP)
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "TAG_TRANSFER",
@@ -253,56 +351,6 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		"amount_usdc":  float64(req.AmountUnits) / 1_000_000.0,
 		"amount_units": req.AmountUnits,
 		"status":       "SETTLED",
-	})
-}
-
-// --- SANDBOX TEST FAUCET ---
-
-type FaucetRequest struct {
-	Tag string `json:"tag"`
-}
-
-func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
-	var req FaucetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid faucet payload")
-		return
-	}
-
-	cleanTag := identity.CleanTag(req.Tag)
-	user, err := h.identityService.ResolveTag(r.Context(), cleanTag)
-	if err != nil {
-		Error(w, http.StatusNotFound, "user tag not found: "+cleanTag)
-		return
-	}
-
-	const faucetAmount = 100_000_000
-	faucetReserveID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
-
-	idempotencyKey := fmt.Sprintf("faucet_%s_%d", cleanTag, time.Now().UnixNano())
-	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
-		IdempotencyKey: idempotencyKey,
-		ReferenceType:  "SANDBOX_FAUCET",
-		Narration:      fmt.Sprintf("Sandbox Test Funds: $100.00 USDC credited to $%s", cleanTag),
-		Corridor:       user.Corridor,
-		Postings: []ledger.PostingInstruction{
-			{AccountID: user.AccountID, AmountUnits: faucetAmount, Direction: ledger.Credit},
-			{AccountID: faucetReserveID, AmountUnits: faucetAmount, Direction: ledger.Debit},
-		},
-	})
-	if err != nil {
-		Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	balanceUnits, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
-
-	JSON(w, http.StatusOK, map[string]any{
-		"tx_id":         entry.ID,
-		"tag":           "$" + cleanTag,
-		"credited_usdc": 100.0,
-		"new_balance":   float64(balanceUnits) / 1_000_000.0,
-		"balance_units": balanceUnits,
 	})
 }
 
@@ -340,55 +388,7 @@ func (h *Handler) LoginUser(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusOK, resp)
 }
 
-// --- ARCSPLIT HANDLERS ---
-
-type CreateSplitRequest struct {
-	CreatorTag string `json:"creator_tag"`
-	Prompt     string `json:"prompt"`
-}
-
-func (h *Handler) CreateSplitSession(w http.ResponseWriter, r *http.Request) {
-	var req CreateSplitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid split request payload")
-		return
-	}
-
-	session, err := h.splitService.CreateSplit(r.Context(), req.CreatorTag, req.Prompt)
-	if err != nil {
-		Error(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-
-	JSON(w, http.StatusCreated, session)
-}
-
-type PaySplitRequest struct {
-	PayerIdentifier string `json:"payer_identifier"`
-	PaymentMethod   string `json:"payment_method"`
-}
-
-func (h *Handler) PaySplitShare(w http.ResponseWriter, r *http.Request) {
-	splitCode := chi.URLParam(r, "code")
-	var req PaySplitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid pay payload")
-		return
-	}
-
-	err := h.splitService.PaySplitShare(r.Context(), splitCode, req.PayerIdentifier, req.PaymentMethod)
-	if err != nil {
-		Error(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-
-	JSON(w, http.StatusOK, map[string]string{
-		"status":  "PAID",
-		"message": "Share successfully settled to creator's balance",
-	})
-}
-
-// --- VAS (AIRTIME) HANDLERS ---
+// --- VAS AIRTIME ---
 
 func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	var req vas.AirtimeRequest
@@ -418,134 +418,7 @@ func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusCreated, receipt)
 }
 
-// --- SOCIAL IDENTITY LOOKUPS ---
-
-func (h *Handler) RegisterTag(w http.ResponseWriter, r *http.Request) {
-	var req identity.RegisterTagRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid tag registration payload")
-		return
-	}
-
-	id, err := h.identityService.RegisterTag(r.Context(), req)
-	if err != nil {
-		Error(w, http.StatusConflict, err.Error())
-		return
-	}
-
-	JSON(w, http.StatusCreated, id)
-}
-
-func (h *Handler) ResolveTag(w http.ResponseWriter, r *http.Request) {
-	tag := chi.URLParam(r, "tag")
-	id, err := h.identityService.ResolveTag(r.Context(), tag)
-	if err != nil {
-		Error(w, http.StatusNotFound, "ArcTag not found")
-		return
-	}
-	JSON(w, http.StatusOK, id)
-}
-
-// --- BASIC LEDGER & POS HANDLERS ---
-
-type CreateAccountRequest struct {
-	HolderID    uuid.UUID          `json:"holder_id"`
-	Corridor    string             `json:"corridor"`
-	Currency    string             `json:"currency"`
-	AccountType ledger.AccountType `json:"account_type"`
-}
-
-func (h *Handler) CreateAccount(w http.ResponseWriter, r *http.Request) {
-	var req CreateAccountRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	acc, err := h.ledgerService.CreateAccount(r.Context(), req.HolderID, req.Corridor, req.Currency, req.AccountType)
-	if err != nil {
-		Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	JSON(w, http.StatusCreated, acc)
-}
-
-func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	accountID, err := uuid.Parse(idStr)
-	if err != nil {
-		Error(w, http.StatusBadRequest, "invalid account uuid")
-		return
-	}
-
-	balanceUnits, err := h.ledgerService.GetBalance(r.Context(), accountID)
-	if err != nil {
-		Error(w, http.StatusNotFound, err.Error())
-		return
-	}
-
-	// Never return a negative balance on user balance inquiries
-	if balanceUnits < 0 {
-		balanceUnits = 0
-	}
-
-	balanceDecimal := float64(balanceUnits) / 1_000_000.0
-
-	JSON(w, http.StatusOK, map[string]any{
-		"account_id":     accountID,
-		"balance_units":  balanceUnits,
-		"balance_amount": balanceDecimal,
-		"currency":       "USDC",
-	})
-}
-
-type TransferRequest struct {
-	IdempotencyKey string                      `json:"idempotency_key"`
-	ReferenceType  string                      `json:"reference_type"`
-	InvoiceID      string                      `json:"invoice_id,omitempty"`
-	Narration      string                      `json:"narration"`
-	Corridor       string                      `json:"corridor"`
-	Postings       []ledger.PostingInstruction `json:"postings"`
-}
-
-func (h *Handler) ProcessTransfer(w http.ResponseWriter, r *http.Request) {
-	var req TransferRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Error(w, http.StatusBadRequest, "invalid request payload")
-		return
-	}
-
-	if req.IdempotencyKey == "" {
-		Error(w, http.StatusBadRequest, "idempotency_key is required")
-		return
-	}
-
-	acquired, err := h.redisClient.AcquireLock(r.Context(), req.IdempotencyKey, 10*time.Second)
-	if err != nil || !acquired {
-		Error(w, http.StatusConflict, "transaction locked or already processed")
-		return
-	}
-
-	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
-		IdempotencyKey: req.IdempotencyKey,
-		ReferenceType:  req.ReferenceType,
-		Narration:      req.Narration,
-		Corridor:       req.Corridor,
-		Postings:       req.Postings,
-	})
-	if err != nil {
-		_ = h.redisClient.ReleaseLock(r.Context(), req.IdempotencyKey)
-		Error(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-
-	if req.InvoiceID != "" {
-		h.posHub.BroadcastPayment(req.InvoiceID, entry.ID.String(), req.Postings[0].AmountUnits)
-	}
-
-	JSON(w, http.StatusCreated, entry)
-}
+// --- POS INVOICES ---
 
 type CreateInvoiceRequest struct {
 	MerchantAccount uuid.UUID `json:"merchant_account_id"`
