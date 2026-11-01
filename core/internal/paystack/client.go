@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -36,9 +35,9 @@ type VerifyResponse struct {
 	Status  bool   `json:"status"`
 	Message string `json:"message"`
 	Data    struct {
-		Status    string `json:"status"` // "success"
+		Status    string `json:"status"`
 		Reference string `json:"reference"`
-		Amount    int64  `json:"amount"` // in Kobo (e.g. 100000 kobo = 1000 NGN)
+		Amount    int64  `json:"amount"`
 		Currency  string `json:"currency"`
 	} `json:"data"`
 }
