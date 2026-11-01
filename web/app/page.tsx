@@ -6,15 +6,17 @@ import {
   Split, 
   Smartphone, 
   Store, 
-  Wallet, 
   CheckCircle2, 
   Copy, 
   Send, 
   Sparkles, 
-  RefreshCw 
+  RefreshCw,
+  User,
+  ShieldCheck,
+  LogOut,
+  Lock
 } from 'lucide-react';
 
-// Automatically normalize URL so it always ends with /api/v1
 const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
 const cleanBase = rawEnv.replace(/\/+$/, '');
 const API_BASE = cleanBase.endsWith('/api/v1') ? cleanBase : `${cleanBase}/api/v1`;
@@ -22,9 +24,20 @@ const API_BASE = cleanBase.endsWith('/api/v1') ? cleanBase : `${cleanBase}/api/v
 export default function ArcpayApp() {
   const [activeTab, setActiveTab] = useState<'wallet' | 'split' | 'airtime' | 'pos'>('wallet');
 
-  // User Profile State
-  const [userTag, setUserTag] = useState('$alex');
-  const [balanceUSD, setBalanceUSD] = useState<number>(245.50);
+  // Auth & Session State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
+
+  // Auth Form State
+  const [authName, setAuthName] = useState('');
+  const [authTag, setAuthTag] = useState('');
+  const [authPhone, setAuthPhone] = useState('+234');
+  const [authPin, setAuthPin] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Financial State
+  const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
 
   // P2P State
   const [recipientTag, setRecipientTag] = useState('');
@@ -32,7 +45,7 @@ export default function ArcpayApp() {
   const [transferLoading, setTransferLoading] = useState(false);
   const [txSuccess, setTxSuccess] = useState<string | null>(null);
 
-  // ArcSplit / Jev State
+  // ArcSplit State
   const [jevPrompt, setJevPrompt] = useState('Split $60 with @chidi and @kofi for dinner at RSVP');
   const [splitLoading, setSplitLoading] = useState(false);
   const [activeSplit, setActiveSplit] = useState<any>(null);
@@ -44,14 +57,37 @@ export default function ArcpayApp() {
   const [airtimeLoading, setAirtimeLoading] = useState(false);
   const [airtimeReceipt, setAirtimeReceipt] = useState<any>(null);
 
-  // Merchant POS State
+  // POS State
   const [posAmount, setPosAmount] = useState('15.00');
   const [posTable, setPosTable] = useState('Table 4');
   const [activeInvoice, setActiveInvoice] = useState<any>(null);
   const [posPaid, setPosPaid] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Audio synthesizer for POS payment confirmation chime
+  // Load user from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('arcpay_user');
+    if (saved) {
+      try {
+        const u = JSON.parse(saved);
+        setCurrentUser(u);
+        fetchBalance(u.account_id);
+      } catch (e) {}
+    } else {
+      setShowAuthModal(true);
+    }
+  }, []);
+
+  const fetchBalance = async (accountId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/accounts/${accountId}/balance`);
+      const data = await res.json();
+      if (data.success) {
+        setBalanceUSD(data.data.balance_amount);
+      }
+    } catch (e) {}
+  };
+
   const playPOSChime = () => {
     try {
       const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -66,12 +102,9 @@ export default function ArcpayApp() {
       gain.connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + 0.4);
-    } catch (e) {
-      console.log('Audio chime not supported');
-    }
+    } catch (e) {}
   };
 
-  // Safe API caller that catches plain-text errors
   const apiCall = async (endpoint: string, options: RequestInit) => {
     const res = await fetch(`${API_BASE}${endpoint}`, options);
     const text = await res.text();
@@ -82,9 +115,62 @@ export default function ArcpayApp() {
     }
   };
 
-  // 1. Social P2P Transfer
+  // Auth Handler
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    try {
+      if (isLoginMode) {
+        const data = await apiCall('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag_or_phone: authTag, pin: authPin })
+        });
+        if (data.success) {
+          setCurrentUser(data.data.user);
+          localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
+          setShowAuthModal(false);
+          fetchBalance(data.data.user.account_id);
+        } else {
+          alert(data.error || 'Login failed');
+        }
+      } else {
+        const data = await apiCall('/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            full_name: authName,
+            phone_number: authPhone,
+            arc_tag: authTag,
+            pin: authPin,
+            corridor: 'NG'
+          })
+        });
+        if (data.success) {
+          setCurrentUser(data.data.user);
+          localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
+          setShowAuthModal(false);
+          setBalanceUSD(0.00);
+        } else {
+          alert(data.error || 'Registration failed');
+        }
+      }
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('arcpay_user');
+    setCurrentUser(null);
+    setShowAuthModal(true);
+  };
+
+  // P2P Transfer
   const handleTransfer = async () => {
-    if (!recipientTag || !transferAmount) return;
+    if (!currentUser || !recipientTag || !transferAmount) return;
     setTransferLoading(true);
     setTxSuccess(null);
     try {
@@ -93,17 +179,17 @@ export default function ArcpayApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idempotency_key: `p2p_${Date.now()}`,
-          sender_tag: userTag,
+          sender_tag: currentUser.arc_tag,
           recipient_tag: recipientTag,
           amount_units: Math.round(parseFloat(transferAmount) * 1_000_000),
-          narration: 'P2P Transfer via WebApp'
+          narration: 'P2P Transfer'
         })
       });
       if (data.success) {
         setTxSuccess(`Sent $${transferAmount} to ${recipientTag}`);
-        setBalanceUSD(prev => prev - parseFloat(transferAmount));
         setTransferAmount('');
         setRecipientTag('');
+        fetchBalance(currentUser.account_id);
       } else {
         alert(data.error || 'Transfer failed');
       }
@@ -114,16 +200,16 @@ export default function ArcpayApp() {
     }
   };
 
-  // 2. ArcSplit with Jev AI
+  // ArcSplit
   const handleCreateSplit = async () => {
-    if (!jevPrompt) return;
+    if (!currentUser || !jevPrompt) return;
     setSplitLoading(true);
     try {
       const data = await apiCall('/consumer/split/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          creator_tag: userTag,
+          creator_tag: currentUser.arc_tag,
           prompt: jevPrompt
         })
       });
@@ -139,8 +225,9 @@ export default function ArcpayApp() {
     }
   };
 
-  // 3. Purchase Airtime
+  // Airtime
   const handleBuyAirtime = async () => {
+    if (!currentUser) return;
     setAirtimeLoading(true);
     setAirtimeReceipt(null);
     try {
@@ -149,7 +236,7 @@ export default function ArcpayApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idempotency_key: `airtime_${Date.now()}`,
-          sender_tag: userTag,
+          sender_tag: currentUser.arc_tag,
           phone_number: airtimePhone,
           operator: airtimeOperator,
           amount_usdc: parseFloat(airtimeAmount),
@@ -158,7 +245,7 @@ export default function ArcpayApp() {
       });
       if (data.success) {
         setAirtimeReceipt(data.data);
-        setBalanceUSD(prev => prev - parseFloat(airtimeAmount));
+        fetchBalance(currentUser.account_id);
       } else {
         alert(data.error || 'Airtime purchase failed');
       }
@@ -169,15 +256,16 @@ export default function ArcpayApp() {
     }
   };
 
-  // 4. Generate Dynamic POS Bill & Open WebSocket
+  // POS Invoice
   const handleCreateInvoice = async () => {
+    if (!currentUser) return;
     setPosPaid(false);
     try {
       const data = await apiCall('/business/pos/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          merchant_account_id: 'c978fde8-5b59-4329-9c58-edebc287c8bd',
+          merchant_account_id: currentUser.account_id,
           amount_units: Math.round(parseFloat(posAmount) * 1_000_000),
           table_number: posTable
         })
@@ -196,6 +284,7 @@ export default function ArcpayApp() {
           if (payload.status === 'PAID') {
             setPosPaid(true);
             playPOSChime();
+            fetchBalance(currentUser.account_id);
           }
         };
       }
@@ -206,8 +295,101 @@ export default function ArcpayApp() {
 
   return (
     <div className="max-w-md mx-auto min-h-screen px-4 py-8 flex flex-col justify-between">
-      {/* Header */}
+      {/* AUTH MODAL */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
+            <div className="text-center space-y-1">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-bold mx-auto flex items-center justify-center text-lg">
+                ₳
+              </div>
+              <h2 className="text-base font-semibold text-white">
+                {isLoginMode ? 'Welcome back' : 'Create Arcpay Account'}
+              </h2>
+              <p className="text-xs text-zinc-400">
+                {isLoginMode ? 'Enter your ArcTag or phone and PIN' : 'Instant onboarding · Zero seed phrases'}
+              </p>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="space-y-3 font-mono text-xs">
+              {!isLoginMode && (
+                <div>
+                  <label className="text-[10px] text-zinc-500">FULL NAME</label>
+                  <input
+                    type="text"
+                    required
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="Emmanuel Okon"
+                    className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white focus:border-emerald-500/50"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-[10px] text-zinc-500">ARCTAG</label>
+                <input
+                  type="text"
+                  required
+                  value={authTag}
+                  onChange={(e) => setAuthTag(e.target.value)}
+                  placeholder="$yourname"
+                  className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white focus:border-emerald-500/50"
+                />
+              </div>
+
+              {!isLoginMode && (
+                <div>
+                  <label className="text-[10px] text-zinc-500">PHONE NUMBER</label>
+                  <input
+                    type="text"
+                    required
+                    value={authPhone}
+                    onChange={(e) => setAuthPhone(e.target.value)}
+                    placeholder="+2348012345678"
+                    className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white focus:border-emerald-500/50"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-[10px] text-zinc-500">4-DIGIT PIN</label>
+                <input
+                  type="password"
+                  maxLength={6}
+                  required
+                  value={authPin}
+                  onChange={(e) => setAuthPin(e.target.value)}
+                  placeholder="••••"
+                  className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white tracking-widest text-center focus:border-emerald-500/50"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full bg-white text-zinc-950 font-semibold py-3.5 rounded-xl text-xs flex items-center justify-center gap-2 hover:bg-zinc-200 transition-colors disabled:opacity-50 mt-2"
+              >
+                {authLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                <span>{isLoginMode ? 'Sign In' : 'Create Account (10s)'}</span>
+              </button>
+            </form>
+
+            <div className="text-center pt-2 border-t border-surfaceBorder">
+              <button
+                onClick={() => setIsLoginMode(!isLoginMode)}
+                className="text-xs text-zinc-400 hover:text-white"
+              >
+                {isLoginMode ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Container */}
       <div>
+        {/* Header */}
         <div className="flex items-center justify-between pb-6 border-b border-surfaceBorder">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 font-bold">
@@ -218,15 +400,41 @@ export default function ArcpayApp() {
               <p className="text-[10px] text-zinc-500 font-mono tracking-wider">SETTLED ON ARC L1</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 bg-surface px-3 py-1.5 rounded-full border border-surfaceBorder">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="text-xs font-mono font-medium text-zinc-300">{userTag}</span>
-          </div>
+
+          {currentUser ? (
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 bg-surface px-3 py-1.5 rounded-full border border-surfaceBorder">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span className="text-xs font-mono font-medium text-zinc-300">{currentUser.arc_tag}</span>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="p-1.5 text-zinc-500 hover:text-white"
+                title="Log out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAuthModal(true)}
+              className="text-xs font-mono bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-full border border-zinc-700 text-white"
+            >
+              Sign In
+            </button>
+          )}
         </div>
 
-        {/* Balance Card */}
+        {/* Balance Card with Progressive KYC Status */}
         <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
-          <div className="text-xs font-mono text-zinc-400 uppercase tracking-wider">Digital Dollar Balance</div>
+          <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
+            <span>Digital Dollar Balance</span>
+            {currentUser && (
+              <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                <ShieldCheck className="w-3 h-3" /> TIER 0 ($100/DAY)
+              </span>
+            )}
+          </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-3xl font-mono font-bold tracking-tight text-white">${balanceUSD.toFixed(2)}</span>
             <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
@@ -263,7 +471,7 @@ export default function ArcpayApp() {
           })}
         </div>
 
-        {/* TAB 1: P2P TRANSFER */}
+        {/* TAB 1: P2P */}
         {activeTab === 'wallet' && (
           <div className="mt-6 p-5 rounded-2xl bg-surface border border-surfaceBorder space-y-4">
             <h2 className="text-xs font-mono text-zinc-400 uppercase tracking-wider">Social P2P Transfer</h2>
@@ -308,7 +516,7 @@ export default function ArcpayApp() {
           </div>
         )}
 
-        {/* TAB 2: ARCSPLIT + JEV AI */}
+        {/* TAB 2: ARCSPLIT */}
         {activeTab === 'split' && (
           <div className="mt-6 p-5 rounded-2xl bg-surface border border-surfaceBorder space-y-4">
             <div className="flex items-center justify-between">
@@ -366,7 +574,7 @@ export default function ArcpayApp() {
           </div>
         )}
 
-        {/* TAB 3: LIVE AIRTIME (VAS) */}
+        {/* TAB 3: AIRTIME */}
         {activeTab === 'airtime' && (
           <div className="mt-6 p-5 rounded-2xl bg-surface border border-surfaceBorder space-y-4">
             <h2 className="text-xs font-mono text-zinc-400 uppercase tracking-wider">First-Party Airtime Top-Up</h2>
@@ -428,7 +636,7 @@ export default function ArcpayApp() {
           </div>
         )}
 
-        {/* TAB 4: MERCHANT POS TERMINAL */}
+        {/* TAB 4: POS */}
         {activeTab === 'pos' && (
           <div className="mt-6 p-5 rounded-2xl bg-surface border border-surfaceBorder space-y-4">
             <div className="flex items-center justify-between">

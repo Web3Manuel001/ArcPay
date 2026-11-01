@@ -15,7 +15,6 @@ func NewRouter(handler *Handler) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	// Strict Fintech CORS Middleware
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -37,20 +36,28 @@ func NewRouter(handler *Handler) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Public Auth
+		r.Route("/auth", func(r chi.Router) {
+			r.Post("/register", handler.RegisterUser)
+			r.Post("/login", handler.LoginUser)
+		})
+
+		// Ledger & Accounts
 		r.Post("/accounts", handler.CreateAccount)
 		r.Get("/accounts/{id}/balance", handler.GetBalance)
 		r.Post("/transactions", handler.ProcessTransfer)
 
+		// Consumer Operations
 		r.Route("/consumer", func(r chi.Router) {
 			r.Post("/identity/register", handler.RegisterTag)
 			r.Get("/identity/resolve/{tag}", handler.ResolveTag)
 			r.Post("/transfers/tag", handler.TransferByTag)
 			r.Post("/vas/airtime", handler.PurchaseAirtime)
-
 			r.Post("/split/create", handler.CreateSplitSession)
 			r.Post("/split/{code}/pay", handler.PaySplitShare)
 		})
 
+		// Business Operations (POS)
 		r.Route("/business/pos", func(r chi.Router) {
 			r.Post("/invoices", handler.CreatePOSInvoice)
 			r.Get("/ws/{invoice_id}", handler.StreamPOSUpdates)

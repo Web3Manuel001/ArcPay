@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/arcpay/core/internal/auth"
 	"github.com/arcpay/core/internal/identity"
 	"github.com/arcpay/core/internal/ledger"
 	"github.com/arcpay/core/internal/pos"
@@ -24,6 +25,7 @@ var upgrader = websocket.Upgrader{
 type Handler struct {
 	ledgerService   *ledger.Service
 	identityService *identity.Service
+	authService     *auth.Service
 	vasService      *vas.Service
 	splitService    *split.Service
 	redisClient     *redis.Client
@@ -33,6 +35,7 @@ type Handler struct {
 func NewHandler(
 	ledgerService *ledger.Service,
 	identityService *identity.Service,
+	authService *auth.Service,
 	vasService *vas.Service,
 	splitService *split.Service,
 	redisClient *redis.Client,
@@ -41,6 +44,7 @@ func NewHandler(
 	return &Handler{
 		ledgerService:   ledgerService,
 		identityService: identityService,
+		authService:     authService,
 		vasService:      vasService,
 		splitService:    splitService,
 		redisClient:     redisClient,
@@ -48,11 +52,45 @@ func NewHandler(
 	}
 }
 
+// --- AUTH HANDLERS ---
+
+func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
+	var req auth.RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid registration request")
+		return
+	}
+
+	resp, err := h.authService.Register(r.Context(), req)
+	if err != nil {
+		Error(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) LoginUser(w http.ResponseWriter, r *http.Request) {
+	var req auth.LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid login request")
+		return
+	}
+
+	resp, err := h.authService.Login(r.Context(), req)
+	if err != nil {
+		Error(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusOK, resp)
+}
+
 // --- ARCSPLIT HANDLERS ---
 
 type CreateSplitRequest struct {
 	CreatorTag string `json:"creator_tag"`
-	Prompt     string `json:"prompt"` // Natural language e.g. "Split $60 with @chidi and @kofi"
+	Prompt     string `json:"prompt"`
 }
 
 func (h *Handler) CreateSplitSession(w http.ResponseWriter, r *http.Request) {
@@ -72,8 +110,8 @@ func (h *Handler) CreateSplitSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type PaySplitRequest struct {
-	PayerIdentifier string `json:"payer_identifier"` // Tag or phone
-	PaymentMethod   string `json:"payment_method"`   // "ARCPAY_BALANCE", "CARD", "BANK_TRANSFER"
+	PayerIdentifier string `json:"payer_identifier"`
+	PaymentMethod   string `json:"payment_method"`
 }
 
 func (h *Handler) PaySplitShare(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +134,7 @@ func (h *Handler) PaySplitShare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- VAS (AIRTIME & BILLS) HANDLERS ---
+// --- VAS (AIRTIME) HANDLERS ---
 
 func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	var req vas.AirtimeRequest
@@ -126,7 +164,7 @@ func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusCreated, receipt)
 }
 
-// --- IDENTITY & SOCIAL TAG HANDLERS ---
+// --- SOCIAL IDENTITY HANDLERS ---
 
 func (h *Handler) RegisterTag(w http.ResponseWriter, r *http.Request) {
 	var req identity.RegisterTagRequest
@@ -210,7 +248,7 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- BASIC LEDGER HANDLERS ---
+// --- BASIC LEDGER & POS HANDLERS ---
 
 type CreateAccountRequest struct {
 	HolderID    uuid.UUID          `json:"holder_id"`
@@ -305,8 +343,6 @@ func (h *Handler) ProcessTransfer(w http.ResponseWriter, r *http.Request) {
 
 	JSON(w, http.StatusCreated, entry)
 }
-
-// --- BUSINESS POS HANDLERS ---
 
 type CreateInvoiceRequest struct {
 	MerchantAccount uuid.UUID `json:"merchant_account_id"`

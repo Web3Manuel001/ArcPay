@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/arcpay/core/internal/api"
+	"github.com/arcpay/core/internal/auth"
 	"github.com/arcpay/core/internal/config"
 	"github.com/arcpay/core/internal/database"
 	"github.com/arcpay/core/internal/identity"
@@ -53,24 +54,24 @@ func main() {
 	identityRepo := identity.NewRepository(pgPool)
 	identityService := identity.NewService(identityRepo)
 
-	// Live Africa's Talking Client
+	// Auth & Tiered KYC Service
+	authService := auth.NewService(pgPool, ledgerService)
+	log.Println("✓ Progressive Auth & Tiered KYC Service Active")
+
+	// Telecom VAS Client
 	var atClient *vas.AfricasTalkingClient
 	if cfg.ATAPIKey != "" {
 		atClient = vas.NewAfricasTalkingClient(cfg.ATUsername, cfg.ATAPIKey, cfg.IsSandbox)
 		log.Println("✓ Real Telecom Switch Connected (Africa's Talking API)")
-	} else {
-		log.Println("⚠️ AT_API_KEY not set in .env. Telco dispatch will simulate onchain settlement.")
 	}
 
 	treasuryAccount := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	vasService := vas.NewService(ledgerService, identityService, atClient, treasuryAccount)
 
-	// Jev Decision Engine & ArcSplit Service
 	jevEngine := jev.NewEngine()
 	splitService := split.NewService(pgPool, jevEngine, identityService, ledgerService, "https://arcpay.me")
-	log.Println("✓ Jev System-1 Decision Engine & ArcSplit Active")
 
-	httpHandler := api.NewHandler(ledgerService, identityService, vasService, splitService, redisClient, posHub)
+	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, redisClient, posHub)
 
 	router := api.NewRouter(httpHandler)
 	server := &http.Server{
