@@ -11,10 +11,10 @@ import {
   Send, 
   Sparkles, 
   RefreshCw,
-  User,
   ShieldCheck,
   LogOut,
-  Lock
+  Lock,
+  PlusCircle
 } from 'lucide-react';
 
 const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
@@ -27,7 +27,7 @@ export default function ArcpayApp() {
   // Auth & Session State
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isLoginMode, setIsLoginMode] = useState(true);
+  const [isLoginMode, setIsLoginMode] = useState(false); // Default to register for new testers
 
   // Auth Form State
   const [authName, setAuthName] = useState('');
@@ -38,6 +38,7 @@ export default function ArcpayApp() {
 
   // Financial State
   const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
+  const [faucetLoading, setFaucetLoading] = useState(false);
 
   // P2P State
   const [recipientTag, setRecipientTag] = useState('');
@@ -64,7 +65,6 @@ export default function ArcpayApp() {
   const [posPaid, setPosPaid] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Load user from localStorage on mount
   useEffect(() => {
     const saved = localStorage.getItem('arcpay_user');
     if (saved) {
@@ -115,6 +115,28 @@ export default function ArcpayApp() {
     }
   };
 
+  // Claim Faucet Test Money ($100 USDC)
+  const handleClaimFaucet = async () => {
+    if (!currentUser) return;
+    setFaucetLoading(true);
+    try {
+      const data = await apiCall('/consumer/faucet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: currentUser.arc_tag })
+      });
+      if (data.success) {
+        setBalanceUSD(data.data.new_balance);
+      } else {
+        alert(data.error || 'Failed to claim test money');
+      }
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setFaucetLoading(false);
+    }
+  };
+
   // Auth Handler
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,7 +172,17 @@ export default function ArcpayApp() {
           setCurrentUser(data.data.user);
           localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
           setShowAuthModal(false);
-          setBalanceUSD(0.00);
+          // Automatically seed new user with $100 test money
+          try {
+            const fData = await apiCall('/consumer/faucet', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tag: data.data.user.arc_tag })
+            });
+            if (fData.success) {
+              setBalanceUSD(fData.data.new_balance);
+            }
+          } catch (e) {}
         } else {
           alert(data.error || 'Registration failed');
         }
@@ -307,7 +339,7 @@ export default function ArcpayApp() {
                 {isLoginMode ? 'Welcome back' : 'Create Arcpay Account'}
               </h2>
               <p className="text-xs text-zinc-400">
-                {isLoginMode ? 'Enter your ArcTag or phone and PIN' : 'Instant onboarding · Zero seed phrases'}
+                {isLoginMode ? 'Enter your ArcTag or phone and PIN' : 'Instant onboarding · $100 test funds included'}
               </p>
             </div>
 
@@ -425,7 +457,7 @@ export default function ArcpayApp() {
           )}
         </div>
 
-        {/* Balance Card with Progressive KYC Status */}
+        {/* Balance Card with Faucet Button */}
         <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
           <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
             <span>Digital Dollar Balance</span>
@@ -435,10 +467,27 @@ export default function ArcpayApp() {
               </span>
             )}
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-3xl font-mono font-bold tracking-tight text-white">${balanceUSD.toFixed(2)}</span>
-            <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
+
+          <div className="mt-2 flex items-baseline justify-between">
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-mono font-bold tracking-tight text-white">${balanceUSD.toFixed(2)}</span>
+              <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
+            </div>
+
+            {/* Test Faucet Trigger */}
+            {currentUser && (
+              <button
+                onClick={handleClaimFaucet}
+                disabled={faucetLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono text-[11px] transition-colors disabled:opacity-50"
+                title="Claim $100 test USDC"
+              >
+                {faucetLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <PlusCircle className="w-3.5 h-3.5" />}
+                <span>+ $100 Test USD</span>
+              </button>
+            )}
           </div>
+
           <div className="mt-1 text-xs font-mono text-zinc-500">
             ≈ ₦{(balanceUSD * 1650).toLocaleString()} NGN
           </div>

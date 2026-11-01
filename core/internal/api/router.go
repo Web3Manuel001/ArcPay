@@ -49,6 +49,7 @@ func NewRouter(handler *Handler) http.Handler {
 
 		// Consumer Operations
 		r.Route("/consumer", func(r chi.Router) {
+			r.Post("/faucet", handler.FaucetTopUp) // SANDBOX TEST FAUCET
 			r.Post("/identity/register", handler.RegisterTag)
 			r.Get("/identity/resolve/{tag}", handler.ResolveTag)
 			r.Post("/transfers/tag", handler.TransferByTag)

@@ -52,6 +52,60 @@ func NewHandler(
 	}
 }
 
+// --- SANDBOX TEST FAUCET ---
+
+type FaucetRequest struct {
+	Tag string `json:"tag"` // e.g. "$emmanuel"
+}
+
+func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
+	var req FaucetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid faucet payload")
+		return
+	}
+
+	cleanTag := identity.CleanTag(req.Tag)
+	user, err := h.identityService.ResolveTag(r.Context(), cleanTag)
+	if err != nil {
+		Error(w, http.StatusNotFound, "user tag not found")
+		return
+	}
+
+	// 100 USDC = 100,000,000 micro-units
+	const faucetAmount = 100_000_000
+	faucetReserveID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	// Ensure system reserve exists
+	_ = h.ledgerService.CreateAccount(r.Context(), faucetReserveID, "GLOBAL", "USDC", ledger.Equity)
+
+	idempotencyKey := fmt.Sprintf("faucet_%s_%d", cleanTag, time.Now().UnixNano())
+	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
+		IdempotencyKey: idempotencyKey,
+		ReferenceType:  "SANDBOX_FAUCET",
+		Narration:      fmt.Sprintf("Sandbox Test Funds: $100.00 USDC credited to $%s", cleanTag),
+		Corridor:       user.Corridor,
+		Postings: []ledger.PostingInstruction{
+			{AccountID: user.AccountID, AmountUnits: faucetAmount, Direction: ledger.Debit},
+			{AccountID: faucetReserveID, AmountUnits: faucetAmount, Direction: ledger.Credit},
+		},
+	})
+	if err != nil {
+		Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	balanceUnits, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
+
+	JSON(w, http.StatusOK, map[string]any{
+		"tx_id":          entry.ID,
+		"tag":            "$" + cleanTag,
+		"credited_usdc":  100.0,
+		"new_balance":    float64(balanceUnits) / 1_000_000.0,
+		"balance_units":  balanceUnits,
+	})
+}
+
 // --- AUTH HANDLERS ---
 
 func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
