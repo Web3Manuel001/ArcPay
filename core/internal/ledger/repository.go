@@ -34,6 +34,7 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, acc *Account) er
 	query := `
 		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (id) DO NOTHING
 	`
 	if acc.ID == uuid.Nil {
 		acc.ID = uuid.New()
@@ -61,9 +62,6 @@ func (r *PostgresRepository) GetAccount(ctx context.Context, id uuid.UUID) (*Acc
 	return &acc, nil
 }
 
-// GetBalance calculates the real-time net balance in atomic micro-units
-// For Asset/Expense accounts: Balance = Debits - Credits
-// For Liability/Equity/Revenue accounts: Balance = Credits - Debits
 func (r *PostgresRepository) GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error) {
 	query := `
 		SELECT 
@@ -94,7 +92,7 @@ func (r *PostgresRepository) GetBalance(ctx context.Context, accountID uuid.UUID
 	}
 }
 
-// RecordTransaction executes atomic ACID postings. All or nothing.
+// RecordTransaction executes atomic ACID postings with self-healing system accounts
 func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -102,7 +100,19 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Insert Journal Entry (Enforces Unique Idempotency Key)
+	// SELF-HEALING HOOK: Ensure system reserve accounts exist inside this exact transaction
+	ensureSystemSQL := `
+		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
+		VALUES 
+			('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'GLOBAL', 'USDC', 'REVENUE', TRUE, NOW()),
+			('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', 'GLOBAL', 'USDC', 'EQUITY', TRUE, NOW())
+		ON CONFLICT (id) DO NOTHING;
+	`
+	if _, err := tx.Exec(ctx, ensureSystemSQL); err != nil {
+		return nil, fmt.Errorf("failed to ensure system accounts: %w", err)
+	}
+
+	// 1. Insert Journal Entry
 	entry := JournalEntry{
 		ID:             uuid.New(),
 		IdempotencyKey: payload.IdempotencyKey,
@@ -120,7 +130,7 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 		return nil, fmt.Errorf("%w: %v", ErrDuplicateIdempotency, err)
 	}
 
-	// 2. Insert Postings atomically
+	// 2. Insert Postings
 	insertPostingQuery := `
 		INSERT INTO postings (id, journal_entry_id, account_id, amount_units, direction, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
