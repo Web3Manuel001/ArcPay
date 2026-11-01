@@ -10,7 +10,7 @@ import (
 
 var (
 	ErrUnbalancedTransaction = errors.New("unbalanced transaction: total debits must equal total credits")
-	ErrInsufficientBalance   = errors.New("insufficient balance for debit transaction")
+	ErrInsufficientBalance   = errors.New("insufficient balance for transaction")
 	ErrZeroPostings          = errors.New("transaction must contain at least two postings")
 )
 
@@ -46,6 +46,7 @@ func (s *Service) GetHistory(ctx context.Context, accountID uuid.UUID, limit int
 	return s.repo.GetHistory(ctx, accountID, limit)
 }
 
+// ProcessTransaction enforces the mathematical accounting invariant AND spendable balance guards
 func (s *Service) ProcessTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error) {
 	if len(payload.Postings) < 2 {
 		return nil, ErrZeroPostings
@@ -64,6 +65,18 @@ func (s *Service) ProcessTransaction(ctx context.Context, payload TransactionPay
 			totalCredits += p.AmountUnits
 		} else {
 			return nil, fmt.Errorf("invalid direction: %s", p.Direction)
+		}
+
+		// ENFORCE BALANCE CHECK: If this posting debits an account (Money Leaving), verify balance!
+		// System clearing accounts (00000000-...) are exempt from float limits
+		if p.Direction == Debit && p.AccountID != uuid.MustParse("00000000-0000-0000-0000-000000000001") && p.AccountID != uuid.MustParse("00000000-0000-0000-0000-000000000002") {
+			avail, err := s.repo.GetBalance(ctx, p.AccountID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check balance for account %s: %w", p.AccountID, err)
+			}
+			if avail < p.AmountUnits {
+				return nil, fmt.Errorf("%w: available %d units, requested %d units", ErrInsufficientBalance, avail, p.AmountUnits)
+			}
 		}
 	}
 

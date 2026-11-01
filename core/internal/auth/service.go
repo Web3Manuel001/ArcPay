@@ -20,12 +20,14 @@ const pinSalt = "arcpay_auth_salt_v1"
 type Service struct {
 	pool          *pgxpool.Pool
 	ledgerService *ledger.Service
+	tokenManager  *TokenManager
 }
 
-func NewService(pool *pgxpool.Pool, ledgerService *ledger.Service) *Service {
+func NewService(pool *pgxpool.Pool, ledgerService *ledger.Service, tm *TokenManager) *Service {
 	return &Service{
 		pool:          pool,
 		ledgerService: ledgerService,
+		tokenManager:  tm,
 	}
 }
 
@@ -43,7 +45,6 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		return nil, errors.New("pin must be at least 4 digits")
 	}
 
-	// 1. Create underlying Double-Entry Ledger Account
 	holderID := uuid.New()
 	corridor := strings.ToUpper(strings.TrimSpace(req.Corridor))
 	if corridor == "" {
@@ -55,12 +56,10 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		return nil, fmt.Errorf("failed to create ledger account: %w", err)
 	}
 
-	// 2. Hash PIN and Phone
 	pinHash := HashPIN(req.PIN)
 	phoneHash := identity.HashPhone(req.PhoneNumber)
 	userID := uuid.New()
 
-	// 3. Insert Identity with Auth & Tier 0 KYC status
 	query := `
 		INSERT INTO identities (
 			id, arc_tag, phone_hash, holder_id, account_id, corridor, 
@@ -72,7 +71,12 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		pinHash, req.PhoneNumber, req.FullName,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("arc tag $%s is already claimed: %w", cleanTag, err)
+		return nil, fmt.Errorf("arc tag $%s is already claimed", cleanTag)
+	}
+
+	token, err := s.tokenManager.GenerateToken(userID, acc.ID, cleanTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate session: %w", err)
 	}
 
 	profile := UserProfile{
@@ -83,12 +87,12 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*AuthRespo
 		AccountID:     acc.ID,
 		Corridor:      corridor,
 		KYCTier:       "TIER_0_STARTER",
-		DailyLimitUSD: 100.0, // Starter tier limit
+		DailyLimitUSD: 100.0,
 	}
 
 	return &AuthResponse{
 		User:  profile,
-		Token: fmt.Sprintf("arc_token_%s_%s", cleanTag, hex.EncodeToString([]byte(userID.String())[:6])),
+		Token: token,
 	}, nil
 }
 
@@ -118,7 +122,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*AuthResponse, e
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("invalid credentials: user not found")
+			return nil, errors.New("invalid credentials")
 		}
 		return nil, err
 	}
@@ -127,11 +131,9 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*AuthResponse, e
 		return nil, errors.New("invalid credentials: incorrect PIN")
 	}
 
-	dailyLimit := 100.0
-	if kycTier == "TIER_1_BASIC" {
-		dailyLimit = 2000.0
-	} else if kycTier == "TIER_2_VERIFIED" {
-		dailyLimit = 50000.0
+	token, err := s.tokenManager.GenerateToken(userID, accountID, arcTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate session: %w", err)
 	}
 
 	return &AuthResponse{
@@ -143,8 +145,8 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*AuthResponse, e
 			AccountID:     accountID,
 			Corridor:      corridor,
 			KYCTier:       kycTier,
-			DailyLimitUSD: dailyLimit,
+			DailyLimitUSD: 100.0,
 		},
-		Token: fmt.Sprintf("arc_token_%s_%s", arcTag, hex.EncodeToString([]byte(userID.String())[:6])),
+		Token: token,
 	}, nil
 }

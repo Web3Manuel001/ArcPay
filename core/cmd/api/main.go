@@ -26,7 +26,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ensureSystemAccounts guarantees system float/equity accounts exist on boot
 func ensureSystemAccounts(ctx context.Context, pool *pgxpool.Pool) error {
 	seedSQL := `
 		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
@@ -53,7 +52,6 @@ func main() {
 	}
 	defer pgPool.Close()
 
-	// Guarantee system accounts exist
 	if err := ensureSystemAccounts(ctx, pgPool); err != nil {
 		log.Printf("⚠️ Warning ensuring system accounts: %v", err)
 	} else {
@@ -76,17 +74,18 @@ func main() {
 	identityRepo := identity.NewRepository(pgPool)
 	identityService := identity.NewService(identityRepo)
 
-	authService := auth.NewService(pgPool, ledgerService)
-	log.Println("✓ Progressive Auth & Tiered KYC Service Active")
+	// Auth & HMAC Token Security
+	tokenManager := auth.NewTokenManager(os.Getenv("JWT_SECRET"))
+	authService := auth.NewService(pgPool, ledgerService, tokenManager)
+	authMiddleware := auth.NewMiddleware(tokenManager)
+	log.Println("✓ Cryptographic HMAC Auth Middleware Active")
 
-	// Telecom VAS Client
 	var atClient *vas.AfricasTalkingClient
 	if cfg.ATAPIKey != "" {
 		atClient = vas.NewAfricasTalkingClient(cfg.ATUsername, cfg.ATAPIKey, cfg.IsSandbox)
 		log.Println("✓ Real Telecom Switch Connected (Africa's Talking API)")
 	}
 
-	// Paystack Client
 	paystackKey := os.Getenv("PAYSTACK_SECRET_KEY")
 	var psClient *paystack.Client
 	if paystackKey != "" {
@@ -102,7 +101,7 @@ func main() {
 
 	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, psClient, redisClient, posHub)
 
-	router := api.NewRouter(httpHandler)
+	router := api.NewRouter(httpHandler, authMiddleware)
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,

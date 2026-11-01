@@ -3,11 +3,12 @@ package api
 import (
 	"net/http"
 
+	"github.com/arcpay/core/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-func NewRouter(handler *Handler) http.Handler {
+func NewRouter(handler *Handler, authMiddleware *auth.Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -36,26 +37,32 @@ func NewRouter(handler *Handler) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Public Auth
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/register", handler.RegisterUser)
 			r.Post("/login", handler.LoginUser)
 		})
 
+		// Public Balances & History
 		r.Get("/accounts/{id}/balance", handler.GetBalance)
 		r.Get("/accounts/{id}/history", handler.GetAccountHistory)
 
-		r.Route("/consumer", func(r chi.Router) {
-			r.Post("/deposit/initialize", handler.InitializeDeposit)
-			r.Get("/deposit/verify/{reference}", handler.VerifyDeposit)
-			r.Post("/transfers/tag", handler.TransferByTag)
-			r.Post("/vas/airtime", handler.PurchaseAirtime)
+		// Public Split Invoicing & Paystack Callbacks
+		r.Get("/consumer/split/{code}", handler.GetSplitSession)
+		r.Post("/consumer/split/{code}/pay", handler.PaySplitShare)
+		r.Post("/consumer/deposit/initialize", handler.InitializeDeposit)
+		r.Get("/consumer/deposit/verify/{reference}", handler.VerifyDeposit)
 
-			// ArcSplit
-			r.Post("/split/create", handler.CreateSplitSession)
-			r.Get("/split/{code}", handler.GetSplitSession)
-			r.Post("/split/{code}/pay", handler.PaySplitShare)
+		// PROTECTED ROUTES: Requires Authorization: Bearer <token>
+		r.Group(func(r chi.Router) {
+			r.Use(authMiddleware.Authenticate)
+
+			r.Post("/consumer/transfers/tag", handler.TransferByTag)
+			r.Post("/consumer/vas/airtime", handler.PurchaseAirtime)
+			r.Post("/consumer/split/create", handler.CreateSplitSession)
 		})
 
+		// Merchant POS
 		r.Route("/business/pos", func(r chi.Router) {
 			r.Post("/invoices", handler.CreatePOSInvoice)
 			r.Get("/ws/{invoice_id}", handler.StreamPOSUpdates)
