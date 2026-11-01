@@ -109,26 +109,6 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acquired, err := h.redisClient.AcquireLock(r.Context(), reference, 30*time.Second)
-	if err != nil || !acquired {
-		Error(w, http.StatusConflict, "deposit already credited or currently verifying")
-		return
-	}
-
-	var amountNGN float64 = 16500.0
-	if h.paystackClient != nil {
-		vResp, err := h.paystackClient.VerifyTransaction(r.Context(), reference)
-		if err != nil || vResp.Data.Status != "success" {
-			_ = h.redisClient.ReleaseLock(r.Context(), reference)
-			Error(w, http.StatusPaymentRequired, "paystack verification failed")
-			return
-		}
-		amountNGN = float64(vResp.Data.Amount) / 100.0
-	}
-
-	usdcAmount := amountNGN / 1650.0
-	units := int64(usdcAmount * 1_000_000)
-
 	parts := strings.Split(reference, "_")
 	var targetTag string
 	if len(parts) >= 3 {
@@ -139,28 +119,47 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.identityService.ResolveTag(r.Context(), targetTag)
 	if err != nil {
-		_ = h.redisClient.ReleaseLock(r.Context(), reference)
 		Error(w, http.StatusNotFound, "user not found: "+targetTag)
 		return
 	}
 
+	var amountNGN float64 = 16500.0
+	if h.paystackClient != nil {
+		vResp, err := h.paystackClient.VerifyTransaction(r.Context(), reference)
+		if err != nil || vResp.Data.Status != "success" {
+			Error(w, http.StatusPaymentRequired, "paystack verification failed")
+			return
+		}
+		amountNGN = float64(vResp.Data.Amount) / 100.0
+	}
+
+	usdcAmount := amountNGN / 1650.0
+	units := int64(usdcAmount * 1_000_000)
 	inboundFloatID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
-	// DEPOSIT POLARITY:
-	// DEBIT User Asset Account (Increases user balance)
-	// CREDIT System Float Account (Balances the ledger)
+	// DEPOSIT: User is CREDITED (+) and Float is DEBITED (-)
 	_, err = h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: reference,
 		ReferenceType:  "PAYSTACK_DEPOSIT",
 		Narration:      fmt.Sprintf("Paystack Deposit ₦%.2f (Credited $%.2f USDC)", amountNGN, usdcAmount),
 		Corridor:       user.Corridor,
 		Postings: []ledger.PostingInstruction{
-			{AccountID: user.AccountID, AmountUnits: units, Direction: ledger.Debit},
-			{AccountID: inboundFloatID, AmountUnits: units, Direction: ledger.Credit},
+			{AccountID: user.AccountID, AmountUnits: units, Direction: ledger.Credit},
+			{AccountID: inboundFloatID, AmountUnits: units, Direction: ledger.Debit},
 		},
 	})
 	if err != nil {
-		_ = h.redisClient.ReleaseLock(r.Context(), reference)
+		// If already processed via idempotency, return success with current balance!
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "duplicate key") {
+			bal, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
+			JSON(w, http.StatusOK, map[string]any{
+				"status":        "ALREADY_CREDITED",
+				"tag":           "$" + targetTag,
+				"credited_usdc": usdcAmount,
+				"new_balance":   float64(bal) / 1_000_000.0,
+			})
+			return
+		}
 		Error(w, http.StatusInternalServerError, "ledger deposit failed: "+err.Error())
 		return
 	}
@@ -175,7 +174,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- SOCIAL P2P TRANSFER (CORRECTED POLARITY) ---
+// --- SOCIAL P2P TRANSFER (BANKING POLARITY) ---
 
 func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 	var req identity.TagTransferRequest
@@ -201,7 +200,6 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify sender has sufficient funds
 	senderBal, err := h.ledgerService.GetBalance(r.Context(), sender.AccountID)
 	if err != nil || senderBal < req.AmountUnits {
 		Error(w, http.StatusUnprocessableEntity, "insufficient balance to complete transfer")
@@ -214,17 +212,17 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P2P POLARITY:
-	// CREDIT Sender Asset (DEDUCTS from sender's balance)
-	// DEBIT Recipient Asset (ADDS to recipient's balance)
+	// BANKING POLARITY:
+	// DEBIT Sender (Money Out: balance goes DOWN)
+	// CREDIT Recipient (Money In: balance goes UP)
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "TAG_TRANSFER",
 		Narration:      fmt.Sprintf("Transfer from $%s to $%s: %s", sender.ArcTag, recipient.ArcTag, req.Narration),
 		Corridor:       sender.Corridor,
 		Postings: []ledger.PostingInstruction{
-			{AccountID: sender.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Credit},
-			{AccountID: recipient.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Debit},
+			{AccountID: sender.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Debit},
+			{AccountID: recipient.AccountID, AmountUnits: req.AmountUnits, Direction: ledger.Credit},
 		},
 	})
 	if err != nil {
@@ -273,8 +271,8 @@ func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
 		Narration:      fmt.Sprintf("Sandbox Test Funds: $100.00 USDC credited to $%s", cleanTag),
 		Corridor:       user.Corridor,
 		Postings: []ledger.PostingInstruction{
-			{AccountID: user.AccountID, AmountUnits: faucetAmount, Direction: ledger.Debit},
-			{AccountID: faucetReserveID, AmountUnits: faucetAmount, Direction: ledger.Credit},
+			{AccountID: user.AccountID, AmountUnits: faucetAmount, Direction: ledger.Credit},
+			{AccountID: faucetReserveID, AmountUnits: faucetAmount, Direction: ledger.Debit},
 		},
 	})
 	if err != nil {

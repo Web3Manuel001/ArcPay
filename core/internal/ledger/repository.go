@@ -62,37 +62,27 @@ func (r *PostgresRepository) GetAccount(ctx context.Context, id uuid.UUID) (*Acc
 	return &acc, nil
 }
 
+// Universal Fintech Balance: Credits (In) - Debits (Out)
 func (r *PostgresRepository) GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error) {
 	query := `
 		SELECT 
-			a.account_type,
-			COALESCE(SUM(CASE WHEN p.direction = 'DEBIT' THEN p.amount_units ELSE 0 END), 0) as total_debits,
-			COALESCE(SUM(CASE WHEN p.direction = 'CREDIT' THEN p.amount_units ELSE 0 END), 0) as total_credits
+			COALESCE(SUM(CASE WHEN p.direction = 'CREDIT' THEN p.amount_units ELSE 0 END), 0) -
+			COALESCE(SUM(CASE WHEN p.direction = 'DEBIT' THEN p.amount_units ELSE 0 END), 0) as net_balance
 		FROM accounts a
 		LEFT JOIN postings p ON a.id = p.account_id
 		WHERE a.id = $1
-		GROUP BY a.account_type
 	`
-	var accType AccountType
-	var debits, credits int64
-
-	err := r.pool.QueryRow(ctx, query, accountID).Scan(&accType, &debits, &credits)
+	var netBalance int64
+	err := r.pool.QueryRow(ctx, query, accountID).Scan(&netBalance)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrAccountNotFound
 		}
 		return 0, err
 	}
-
-	switch accType {
-	case Asset, Expense:
-		return debits - credits, nil
-	default:
-		return credits - debits, nil
-	}
+	return netBalance, nil
 }
 
-// RecordTransaction executes atomic ACID postings with self-healing system accounts
 func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload TransactionPayload) (*JournalEntry, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -100,7 +90,7 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 	}
 	defer tx.Rollback(ctx)
 
-	// SELF-HEALING HOOK: Ensure system reserve accounts exist inside this exact transaction
+	// Ensure system reserve accounts exist inside this transaction
 	ensureSystemSQL := `
 		INSERT INTO accounts (id, holder_id, corridor, currency, account_type, is_active, created_at)
 		VALUES 
@@ -112,7 +102,6 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 		return nil, fmt.Errorf("failed to ensure system accounts: %w", err)
 	}
 
-	// 1. Insert Journal Entry
 	entry := JournalEntry{
 		ID:             uuid.New(),
 		IdempotencyKey: payload.IdempotencyKey,
@@ -130,7 +119,6 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 		return nil, fmt.Errorf("%w: %v", ErrDuplicateIdempotency, err)
 	}
 
-	// 2. Insert Postings
 	insertPostingQuery := `
 		INSERT INTO postings (id, journal_entry_id, account_id, amount_units, direction, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
@@ -143,7 +131,6 @@ func (r *PostgresRepository) RecordTransaction(ctx context.Context, payload Tran
 		}
 	}
 
-	// 3. Commit
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}

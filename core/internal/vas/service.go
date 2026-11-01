@@ -52,7 +52,6 @@ func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*Air
 		return nil, fmt.Errorf("invalid airtime amount: %.2f", req.AmountUSDC)
 	}
 
-	// Verify balance
 	userBal, err := s.ledgerService.GetBalance(ctx, userIdentity.AccountID)
 	if err != nil || userBal < amountUnits {
 		return nil, fmt.Errorf("insufficient balance for airtime top-up")
@@ -62,17 +61,17 @@ func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*Air
 	localValue := req.AmountUSDC * rate
 	localFormatted := fmt.Sprintf("%s %.2f", currencySymbol, localValue)
 
-	// AIRTIME SPEND POLARITY:
-	// CREDIT User Asset (DEDUCTS from user's balance)
-	// DEBIT Treasury/Float Account (Balances ledger entry)
+	// BANKING POLARITY:
+	// DEBIT User (Money Out: balance goes DOWN)
+	// CREDIT Treasury (Money In: float balances)
 	entry, err := s.ledgerService.ProcessTransaction(ctx, ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "VAS_AIRTIME",
 		Narration:      fmt.Sprintf("Airtime Recharge: %s %s to %s", req.Operator, localFormatted, req.PhoneNumber),
 		Corridor:       req.Corridor,
 		Postings: []ledger.PostingInstruction{
-			{AccountID: userIdentity.AccountID, AmountUnits: amountUnits, Direction: ledger.Credit},
-			{AccountID: s.treasuryAccount, AmountUnits: amountUnits, Direction: ledger.Debit},
+			{AccountID: userIdentity.AccountID, AmountUnits: amountUnits, Direction: ledger.Debit},
+			{AccountID: s.treasuryAccount, AmountUnits: amountUnits, Direction: ledger.Credit},
 		},
 	})
 	if err != nil {
