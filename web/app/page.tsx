@@ -18,7 +18,9 @@ import {
   Plus,
   CreditCard,
   Share2,
-  X
+  X,
+  ExternalLink,
+  Cpu
 } from 'lucide-react';
 
 const rawEnv = process.env.NEXT_PUBLIC_API_URL || 'https://arcpay-core.onrender.com/api/v1';
@@ -28,62 +30,62 @@ const API_BASE = cleanBase.endsWith('/api/v1') ? cleanBase : `${cleanBase}/api/v
 export default function ArcpayApp() {
   const [activeTab, setActiveTab] = useState<'wallet' | 'split' | 'airtime' | 'pos'>('wallet');
 
-  // Auth & Session State
+  // Auth & Session
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isLoginMode, setIsLoginMode] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
 
-  // Auth Form State
+  // Form State
   const [authName, setAuthName] = useState('');
   const [authTag, setAuthTag] = useState('');
   const [authPhone, setAuthPhone] = useState('+234');
   const [authPin, setAuthPin] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  // Financial State
+  // Financial & Blockchain State
   const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
   const [history, setHistory] = useState<any[]>([]);
+  const [networkInfo, setNetworkInfo] = useState<any>(null);
 
   // Modals & Receipts
   const [selectedReceipt, setSelectedReceipt] = useState<any>(null);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  // Deposit State
+  // Paystack Deposit
   const [depositAmountNGN, setDepositAmountNGN] = useState('16500');
   const [depositLoading, setDepositLoading] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
 
-  // P2P State
+  // P2P
   const [recipientTag, setRecipientTag] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
   const [transferLoading, setTransferLoading] = useState(false);
 
-  // ArcSplit State
+  // ArcSplit
   const [jevPrompt, setJevPrompt] = useState('Split $60 with @chidi and @kofi for dinner at RSVP');
   const [splitLoading, setSplitLoading] = useState(false);
   const [activeSplit, setActiveSplit] = useState<any>(null);
 
-  // Airtime State
+  // Airtime
   const [airtimePhone, setAirtimePhone] = useState('+2348099998888');
   const [airtimeOperator, setAirtimeOperator] = useState('MTN');
   const [airtimeAmount, setAirtimeAmount] = useState('2.00');
   const [airtimeLoading, setAirtimeLoading] = useState(false);
 
-  // POS State
+  // POS
   const [posAmount, setPosAmount] = useState('15.00');
   const [posTable, setPosTable] = useState('Table 4');
   const [activeInvoice, setActiveInvoice] = useState<any>(null);
   const [posPaid, setPosPaid] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Auto-toast dismiss
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Load User & Auto-Refresh Balance
   useEffect(() => {
+    fetchNetworkStatus();
     const saved = localStorage.getItem('arcpay_user');
     if (saved) {
       try {
@@ -91,7 +93,6 @@ export default function ArcpayApp() {
         setCurrentUser(u);
         fetchBalanceAndHistory(u.account_id);
 
-        // Check Paystack Callback
         const params = new URLSearchParams(window.location.search);
         const ref = params.get('verify_ref') || params.get('reference');
         if (ref) {
@@ -103,7 +104,7 @@ export default function ArcpayApp() {
     }
   }, []);
 
-  // 5-second Polling Loop for Live Balance & History
+  // 5-second Polling Loop
   useEffect(() => {
     if (!currentUser) return;
     const interval = setInterval(() => {
@@ -112,15 +113,23 @@ export default function ArcpayApp() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
+  const fetchNetworkStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/network/status`);
+      const data = await res.json();
+      if (data.success) {
+        setNetworkInfo(data.data);
+      }
+    } catch (e) {}
+  };
+
   const fetchBalanceAndHistory = async (accountId: string) => {
     try {
-      // Balance
       const bRes = await fetch(`${API_BASE}/accounts/${accountId}/balance`);
       const bData = await bRes.json();
       if (bData.success) {
         setBalanceUSD(bData.data.balance_amount);
       }
-      // History
       const hRes = await fetch(`${API_BASE}/accounts/${accountId}/history`);
       const hData = await hRes.json();
       if (hData.success) {
@@ -158,8 +167,21 @@ export default function ArcpayApp() {
     } catch (e) {}
   };
 
-  const apiCall = async (endpoint: string, options: RequestInit) => {
-    const res = await fetch(`${API_BASE}${endpoint}`, options);
+  // Authenticated API Fetcher
+  const apiCall = async (endpoint: string, options: RequestInit = {}) => {
+    const saved = localStorage.getItem('arcpay_user');
+    const token = saved ? JSON.parse(saved).token : '';
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+
+    const res = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers: { ...headers, ...(options.headers as any) }
+    });
+
     const text = await res.text();
     try {
       return JSON.parse(text);
@@ -175,7 +197,6 @@ export default function ArcpayApp() {
     try {
       const data = await apiCall('/consumer/deposit/initialize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tag: currentUser.arc_tag,
           amount_ngn: parseFloat(depositAmountNGN)
@@ -201,22 +222,21 @@ export default function ArcpayApp() {
       if (isLoginMode) {
         const data = await apiCall('/auth/login', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tag_or_phone: authTag, pin: authPin })
         });
         if (data.success) {
-          setCurrentUser(data.data.user);
-          localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
+          const u = { ...data.data.user, token: data.data.token };
+          setCurrentUser(u);
+          localStorage.setItem('arcpay_user', JSON.stringify(u));
           setShowAuthModal(false);
-          fetchBalanceAndHistory(data.data.user.account_id);
-          showToast(`Welcome back, ${data.data.user.arc_tag}`);
+          fetchBalanceAndHistory(u.account_id);
+          showToast(`Welcome back, ${u.arc_tag}`);
         } else {
           showToast(data.error || 'Login failed', 'error');
         }
       } else {
         const data = await apiCall('/auth/register', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             full_name: authName,
             phone_number: authPhone,
@@ -226,11 +246,12 @@ export default function ArcpayApp() {
           })
         });
         if (data.success) {
-          setCurrentUser(data.data.user);
-          localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
+          const u = { ...data.data.user, token: data.data.token };
+          setCurrentUser(u);
+          localStorage.setItem('arcpay_user', JSON.stringify(u));
           setShowAuthModal(false);
           setBalanceUSD(0.00);
-          showToast(`Account created! Welcome ${data.data.user.arc_tag}`);
+          showToast(`Account created! Welcome ${u.arc_tag}`);
         } else {
           showToast(data.error || 'Registration failed', 'error');
         }
@@ -248,17 +269,15 @@ export default function ArcpayApp() {
     setShowAuthModal(true);
   };
 
-  // P2P Transfer
+  // Secure P2P Transfer
   const handleTransfer = async () => {
     if (!currentUser || !recipientTag || !transferAmount) return;
     setTransferLoading(true);
     try {
       const data = await apiCall('/consumer/transfers/tag', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idempotency_key: `p2p_${Date.now()}`,
-          sender_tag: currentUser.arc_tag,
           recipient_tag: recipientTag,
           amount_units: Math.round(parseFloat(transferAmount) * 1_000_000),
           narration: 'P2P Transfer'
@@ -270,7 +289,7 @@ export default function ArcpayApp() {
           title: 'P2P Transfer',
           amountUSD: parseFloat(transferAmount),
           narration: `Sent to ${recipientTag}`,
-          reference: data.data.journal_id,
+          reference: data.data.onchain_tx || data.data.journal_id,
           date: new Date().toLocaleString(),
           isDebit: true
         });
@@ -294,7 +313,6 @@ export default function ArcpayApp() {
     try {
       const data = await apiCall('/consumer/split/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           creator_tag: currentUser.arc_tag,
           prompt: jevPrompt
@@ -313,14 +331,13 @@ export default function ArcpayApp() {
     }
   };
 
-  // Airtime
+  // Airtime Top-Up
   const handleBuyAirtime = async () => {
     if (!currentUser) return;
     setAirtimeLoading(true);
     try {
       const data = await apiCall('/consumer/vas/airtime', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idempotency_key: `airtime_${Date.now()}`,
           sender_tag: currentUser.arc_tag,
@@ -358,7 +375,6 @@ export default function ArcpayApp() {
     try {
       const data = await apiCall('/business/pos/invoices', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           merchant_account_id: currentUser.account_id,
           amount_units: Math.round(parseFloat(posAmount) * 1_000_000),
@@ -436,11 +452,11 @@ export default function ArcpayApp() {
               </div>
               <div className="flex justify-between text-zinc-400">
                 <span>Network:</span>
-                <span className="text-emerald-400">Circle Arc L1</span>
+                <span className="text-emerald-400">Circle Arc L1 Testnet</span>
               </div>
               <div className="flex justify-between text-zinc-400">
-                <span>Status:</span>
-                <span className="text-white">SETTLED (FINAL)</span>
+                <span>Onchain Ref:</span>
+                <span className="text-zinc-300 font-mono text-[10px] truncate max-w-[150px]">{selectedReceipt.reference}</span>
               </div>
             </div>
 
@@ -549,7 +565,7 @@ export default function ArcpayApp() {
         </div>
       )}
 
-      {/* DEPOSIT MODAL */}
+      {/* PAYSTACK DEPOSIT MODAL */}
       {showDepositModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
@@ -650,8 +666,21 @@ export default function ArcpayApp() {
           )}
         </div>
 
+        {/* Live Onchain Network Status Banner */}
+        {networkInfo && (
+          <div className="mt-4 px-3.5 py-2 bg-emerald-950/20 border border-emerald-500/20 rounded-xl flex items-center justify-between font-mono text-[11px] text-emerald-400">
+            <div className="flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 animate-pulse text-emerald-400" />
+              <span>{networkInfo.network_name}</span>
+            </div>
+            <div className="text-[10px] text-zinc-400">
+              Block #{networkInfo.latest_block} · Gas: {networkInfo.gas_token}
+            </div>
+          </div>
+        )}
+
         {/* Balance Card */}
-        <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
+        <div className="mt-4 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
           <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
             <span>Digital Dollar Balance</span>
             {currentUser && (
@@ -935,12 +964,12 @@ export default function ArcpayApp() {
           </div>
         )}
 
-        {/* TRANSACTION HISTORY FEED */}
+        {/* ACTIVITY FEED */}
         {currentUser && (
           <div className="mt-8 space-y-3">
             <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
               <span className="uppercase tracking-wider">Activity Feed</span>
-              <span className="text-[10px] text-zinc-600">LIVE AUTO-SYNC</span>
+              <span className="text-[10px] text-zinc-600">ARC L1 SYNCED</span>
             </div>
 
             {history.length === 0 ? (

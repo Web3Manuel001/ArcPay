@@ -12,6 +12,7 @@ import (
 
 	"github.com/arcpay/core/internal/api"
 	"github.com/arcpay/core/internal/auth"
+	"github.com/arcpay/core/internal/blockchain"
 	"github.com/arcpay/core/internal/config"
 	"github.com/arcpay/core/internal/database"
 	"github.com/arcpay/core/internal/identity"
@@ -21,6 +22,7 @@ import (
 	"github.com/arcpay/core/internal/pos"
 	"github.com/arcpay/core/internal/redis"
 	"github.com/arcpay/core/internal/split"
+	"github.com/arcpay/core/internal/trade"
 	"github.com/arcpay/core/internal/vas"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,7 +57,7 @@ func main() {
 	if err := ensureSystemAccounts(ctx, pgPool); err != nil {
 		log.Printf("⚠️ Warning ensuring system accounts: %v", err)
 	} else {
-		log.Println("✓ Verified System Accounts (Treasury & Faucet Reserve)")
+		log.Println("✓ Verified System Accounts (Treasury & Inbound Reserve)")
 	}
 
 	redisClient, err := redis.NewClient(cfg.RedisURL)
@@ -74,11 +76,13 @@ func main() {
 	identityRepo := identity.NewRepository(pgPool)
 	identityService := identity.NewService(identityRepo)
 
-	// Auth & HMAC Token Security
 	tokenManager := auth.NewTokenManager(os.Getenv("JWT_SECRET"))
 	authService := auth.NewService(pgPool, ledgerService, tokenManager)
 	authMiddleware := auth.NewMiddleware(tokenManager)
 	log.Println("✓ Cryptographic HMAC Auth Middleware Active")
+
+	// Pure-Go Arc L1 RPC Client
+	blockchainClient := blockchain.NewClient(ctx, cfg.ArcRPCURL)
 
 	var atClient *vas.AfricasTalkingClient
 	if cfg.ATAPIKey != "" {
@@ -90,7 +94,7 @@ func main() {
 	var psClient *paystack.Client
 	if paystackKey != "" {
 		psClient = paystack.NewClient(paystackKey)
-		log.Println("✓ Paystack Sandbox Payment Gateway Connected")
+		log.Println("✓ Paystack Payment Gateway Connected")
 	}
 
 	treasuryAccount := uuid.MustParse("00000000-0000-0000-0000-000000000001")
@@ -99,7 +103,11 @@ func main() {
 	jevEngine := jev.NewEngine()
 	splitService := split.NewService(pgPool, jevEngine, identityService, ledgerService, "https://test-arcpay.vercel.app")
 
-	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, psClient, redisClient, posHub)
+	// Arcpay Trade Engine (B2B Importer Escrow)
+	tradeService := trade.NewService(pgPool, identityService, ledgerService, treasuryAccount)
+	log.Println("✓ Arcpay Trade (B2B Importer Escrow) Engine Active")
+
+	httpHandler := api.NewHandler(ledgerService, identityService, authService, vasService, splitService, tradeService, blockchainClient, psClient, redisClient, posHub)
 
 	router := api.NewRouter(httpHandler, authMiddleware)
 	server := &http.Server{

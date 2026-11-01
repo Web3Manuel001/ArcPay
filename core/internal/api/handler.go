@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/arcpay/core/internal/auth"
+	"github.com/arcpay/core/internal/blockchain"
 	"github.com/arcpay/core/internal/identity"
 	"github.com/arcpay/core/internal/ledger"
 	"github.com/arcpay/core/internal/paystack"
 	"github.com/arcpay/core/internal/pos"
 	"github.com/arcpay/core/internal/redis"
 	"github.com/arcpay/core/internal/split"
+	"github.com/arcpay/core/internal/trade"
 	"github.com/arcpay/core/internal/vas"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -25,14 +27,16 @@ var upgrader = websocket.Upgrader{
 }
 
 type Handler struct {
-	ledgerService   *ledger.Service
-	identityService *identity.Service
-	authService     *auth.Service
-	vasService      *vas.Service
-	splitService    *split.Service
-	paystackClient  *paystack.Client
-	redisClient     *redis.Client
-	posHub          *pos.Hub
+	ledgerService    *ledger.Service
+	identityService  *identity.Service
+	authService      *auth.Service
+	vasService       *vas.Service
+	splitService     *split.Service
+	tradeService     *trade.Service
+	blockchainClient *blockchain.Client
+	paystackClient   *paystack.Client
+	redisClient      *redis.Client
+	posHub           *pos.Hub
 }
 
 func NewHandler(
@@ -41,23 +45,98 @@ func NewHandler(
 	authService *auth.Service,
 	vasService *vas.Service,
 	splitService *split.Service,
+	tradeService *trade.Service,
+	blockchainClient *blockchain.Client,
 	paystackClient *paystack.Client,
 	redisClient *redis.Client,
 	posHub *pos.Hub,
 ) *Handler {
 	return &Handler{
-		ledgerService:   ledgerService,
-		identityService: identityService,
-		authService:     authService,
-		vasService:      vasService,
-		splitService:    splitService,
-		paystackClient:  paystackClient,
-		redisClient:     redisClient,
-		posHub:          posHub,
+		ledgerService:    ledgerService,
+		identityService:  identityService,
+		authService:      authService,
+		vasService:       vasService,
+		splitService:     splitService,
+		tradeService:     tradeService,
+		blockchainClient: blockchainClient,
+		paystackClient:   paystackClient,
+		redisClient:      redisClient,
+		posHub:           posHub,
 	}
 }
 
-// --- AUTHENTICATED P2P TRANSFER (ZERO SPOOFING) ---
+// --- ARCPAY TRADE (B2B IMPORTER ESCROW) ---
+
+func (h *Handler) CreateTradeInvoice(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.GetClaims(r.Context())
+	if !ok {
+		Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req trade.CreateTradeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid trade payload")
+		return
+	}
+
+	invoice, err := h.tradeService.CreateTradeInvoice(r.Context(), claims.ArcTag, req)
+	if err != nil {
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusCreated, invoice)
+}
+
+func (h *Handler) FundTradeEscrow(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.GetClaims(r.Context())
+	if !ok {
+		Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	code := chi.URLParam(r, "code")
+	err := h.tradeService.FundTradeEscrow(r.Context(), code, claims.ArcTag)
+	if err != nil {
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusOK, map[string]string{
+		"status":  "IN_ESCROW",
+		"message": "Funds locked securely in escrow until shipping dispatch confirmation",
+	})
+}
+
+func (h *Handler) ReleaseTradeEscrow(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.GetClaims(r.Context())
+	if !ok {
+		Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	code := chi.URLParam(r, "code")
+	err := h.tradeService.ReleaseTradeEscrow(r.Context(), code, claims.ArcTag)
+	if err != nil {
+		Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	JSON(w, http.StatusOK, map[string]string{
+		"status":  "RELEASED",
+		"message": "Escrow released to overseas supplier",
+	})
+}
+
+// --- BLOCKCHAIN STATUS ---
+
+func (h *Handler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
+	status := h.blockchainClient.GetStatus(r.Context())
+	JSON(w, http.StatusOK, status)
+}
+
+// --- AUTHENTICATED P2P TRANSFER ---
 
 type SecureTransferRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
@@ -67,7 +146,6 @@ type SecureTransferRequest struct {
 }
 
 func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
-	// SECURITY: Sender identity is strictly extracted from verified session claims!
 	claims, ok := auth.GetClaims(r.Context())
 	if !ok {
 		Error(w, http.StatusUnauthorized, "unauthorized session")
@@ -106,7 +184,6 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Double-Entry Polarity: DEBIT Sender (Out), CREDIT Recipient (In)
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "TAG_TRANSFER",
@@ -123,13 +200,17 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	onchainTx := h.blockchainClient.FormatOnchainTxHash(entry.ID.String())
+
 	JSON(w, http.StatusCreated, map[string]any{
-		"journal_id":   entry.ID,
-		"from":         "$" + claims.ArcTag,
-		"to":           "$" + recipient.ArcTag,
-		"amount_usdc":  float64(req.AmountUnits) / 1_000_000.0,
-		"amount_units": req.AmountUnits,
-		"status":       "SETTLED",
+		"journal_id":    entry.ID,
+		"from":          "$" + claims.ArcTag,
+		"to":            "$" + recipient.ArcTag,
+		"amount_usdc":   float64(req.AmountUnits) / 1_000_000.0,
+		"amount_units":  req.AmountUnits,
+		"onchain_tx":    onchainTx,
+		"block_network": "Arc L1 Testnet",
+		"status":        "SETTLED",
 	})
 }
 
@@ -354,11 +435,19 @@ func (h *Handler) PaySplitShare(w http.ResponseWriter, r *http.Request) {
 // --- VAS AIRTIME ---
 
 func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.GetClaims(r.Context())
+	if !ok {
+		Error(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	var req vas.AirtimeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		Error(w, http.StatusBadRequest, "invalid airtime payload")
 		return
 	}
+
+	req.SenderTag = claims.ArcTag // Strictly use verified tag
 
 	if req.IdempotencyKey == "" {
 		Error(w, http.StatusBadRequest, "idempotency_key is required")
@@ -381,7 +470,7 @@ func (h *Handler) PurchaseAirtime(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusCreated, receipt)
 }
 
-// --- AUTH HANDLERS ---
+// --- AUTH ---
 
 func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 	var req auth.RegisterRequest

@@ -37,6 +37,9 @@ func NewRouter(handler *Handler, authMiddleware *auth.Middleware) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Live Onchain Arc L1 Status
+		r.Get("/network/status", handler.GetNetworkStatus)
+
 		// Public Auth
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/register", handler.RegisterUser)
@@ -47,7 +50,7 @@ func NewRouter(handler *Handler, authMiddleware *auth.Middleware) http.Handler {
 		r.Get("/accounts/{id}/balance", handler.GetBalance)
 		r.Get("/accounts/{id}/history", handler.GetAccountHistory)
 
-		// Public Split Invoicing & Paystack Callbacks
+		// Public Split & Paystack Callbacks
 		r.Get("/consumer/split/{code}", handler.GetSplitSession)
 		r.Post("/consumer/split/{code}/pay", handler.PaySplitShare)
 		r.Post("/consumer/deposit/initialize", handler.InitializeDeposit)
@@ -60,9 +63,14 @@ func NewRouter(handler *Handler, authMiddleware *auth.Middleware) http.Handler {
 			r.Post("/consumer/transfers/tag", handler.TransferByTag)
 			r.Post("/consumer/vas/airtime", handler.PurchaseAirtime)
 			r.Post("/consumer/split/create", handler.CreateSplitSession)
+
+			// Arcpay Trade (B2B Importer Escrow)
+			r.Post("/trade/invoices", handler.CreateTradeInvoice)
+			r.Post("/trade/invoices/{code}/fund", handler.FundTradeEscrow)
+			r.Post("/trade/invoices/{code}/release", handler.ReleaseTradeEscrow)
 		})
 
-		// Merchant POS
+		// Merchant POS Terminal
 		r.Route("/business/pos", func(r chi.Router) {
 			r.Post("/invoices", handler.CreatePOSInvoice)
 			r.Get("/ws/{invoice_id}", handler.StreamPOSUpdates)

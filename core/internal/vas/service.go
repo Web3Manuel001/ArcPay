@@ -54,16 +54,13 @@ func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*Air
 
 	userBal, err := s.ledgerService.GetBalance(ctx, userIdentity.AccountID)
 	if err != nil || userBal < amountUnits {
-		return nil, fmt.Errorf("insufficient balance for airtime top-up")
+		return nil, fmt.Errorf("insufficient balance for airtime purchase")
 	}
 
 	rate, currencySymbol := getFXRate(req.Corridor)
 	localValue := req.AmountUSDC * rate
 	localFormatted := fmt.Sprintf("%s %.2f", currencySymbol, localValue)
 
-	// BANKING POLARITY:
-	// DEBIT User (Money Out: balance goes DOWN)
-	// CREDIT Treasury (Money In: float balances)
 	entry, err := s.ledgerService.ProcessTransaction(ctx, ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "VAS_AIRTIME",
@@ -78,13 +75,16 @@ func (s *Service) PurchaseAirtime(ctx context.Context, req AirtimeRequest) (*Air
 		return nil, fmt.Errorf("ledger debit failed: %w", err)
 	}
 
-	var telcoStatus = "DELIVERED"
+	// Honest Status Reporting
+	var telcoStatus = "SIMULATED_TESTNET"
 	if s.atClient != nil {
 		telcoResp, err := s.atClient.DispatchAirtime(ctx, req.PhoneNumber, localFormatted)
 		if err != nil {
 			return nil, fmt.Errorf("telco switch dispatch error: %w", err)
 		}
-		if len(telcoResp.Responses) > 0 && telcoResp.Responses[0].Status != "Sent" {
+		if len(telcoResp.Responses) > 0 && telcoResp.Responses[0].Status == "Sent" {
+			telcoStatus = "DELIVERED"
+		} else if len(telcoResp.Responses) > 0 {
 			telcoStatus = telcoResp.Responses[0].Status
 		}
 	}
