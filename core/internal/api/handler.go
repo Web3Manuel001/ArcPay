@@ -55,7 +55,7 @@ func NewHandler(
 // --- SANDBOX TEST FAUCET ---
 
 type FaucetRequest struct {
-	Tag string `json:"tag"` // e.g. "$emmanuel"
+	Tag string `json:"tag"`
 }
 
 func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
@@ -68,16 +68,12 @@ func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
 	cleanTag := identity.CleanTag(req.Tag)
 	user, err := h.identityService.ResolveTag(r.Context(), cleanTag)
 	if err != nil {
-		Error(w, http.StatusNotFound, "user tag not found")
+		Error(w, http.StatusNotFound, "user tag not found: "+cleanTag)
 		return
 	}
 
-	// 100 USDC = 100,000,000 micro-units
-	const faucetAmount = 100_000_000
+	const faucetAmount = 100_000_000 // 100 USDC
 	faucetReserveID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
-
-	// Ensure system reserve exists
-	_, _ = h.ledgerService.CreateAccount(r.Context(), faucetReserveID, "GLOBAL", "USDC", ledger.Equity)
 
 	idempotencyKey := fmt.Sprintf("faucet_%s_%d", cleanTag, time.Now().UnixNano())
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
@@ -98,11 +94,11 @@ func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
 	balanceUnits, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
 
 	JSON(w, http.StatusOK, map[string]any{
-		"tx_id":          entry.ID,
-		"tag":            "$" + cleanTag,
-		"credited_usdc":  100.0,
-		"new_balance":    float64(balanceUnits) / 1_000_000.0,
-		"balance_units":  balanceUnits,
+		"tx_id":         entry.ID,
+		"tag":           "$" + cleanTag,
+		"credited_usdc": 100.0,
+		"new_balance":   float64(balanceUnits) / 1_000_000.0,
+		"balance_units": balanceUnits,
 	})
 }
 
