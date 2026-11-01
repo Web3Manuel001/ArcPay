@@ -149,7 +149,6 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		// If already processed via idempotency, return success with current balance!
 		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "duplicate key") {
 			bal, _ := h.ledgerService.GetBalance(r.Context(), user.AccountID)
 			JSON(w, http.StatusOK, map[string]any{
@@ -174,7 +173,7 @@ func (h *Handler) VerifyDeposit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- SOCIAL P2P TRANSFER (BANKING POLARITY) ---
+// --- SOCIAL P2P TRANSFER (BANKING POLARITY + NEVER-NEGATIVE GUARD) ---
 
 func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 	var req identity.TagTransferRequest
@@ -185,6 +184,10 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 
 	if req.IdempotencyKey == "" {
 		Error(w, http.StatusBadRequest, "idempotency_key is required")
+		return
+	}
+	if req.AmountUnits <= 0 {
+		Error(w, http.StatusBadRequest, "transfer amount must be greater than zero")
 		return
 	}
 
@@ -200,9 +203,21 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if sender.AccountID == recipient.AccountID {
+		Error(w, http.StatusBadRequest, "cannot transfer money to yourself")
+		return
+	}
+
+	// STRICT FINTECH GUARD: Verify sender has enough funds before touching ledger
 	senderBal, err := h.ledgerService.GetBalance(r.Context(), sender.AccountID)
-	if err != nil || senderBal < req.AmountUnits {
-		Error(w, http.StatusUnprocessableEntity, "insufficient balance to complete transfer")
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "failed to check sender balance")
+		return
+	}
+	if senderBal < req.AmountUnits {
+		availUSD := float64(senderBal) / 1_000_000.0
+		reqUSD := float64(req.AmountUnits) / 1_000_000.0
+		Error(w, http.StatusUnprocessableEntity, fmt.Sprintf("insufficient funds: available balance is $%.2f, requested $%.2f", availUSD, reqUSD))
 		return
 	}
 
@@ -213,8 +228,8 @@ func (h *Handler) TransferByTag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// BANKING POLARITY:
-	// DEBIT Sender (Money Out: balance goes DOWN)
-	// CREDIT Recipient (Money In: balance goes UP)
+	// DEBIT Sender (Deducts: balance goes DOWN)
+	// CREDIT Recipient (Adds: balance goes UP)
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
 		IdempotencyKey: req.IdempotencyKey,
 		ReferenceType:  "TAG_TRANSFER",
@@ -468,6 +483,11 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		Error(w, http.StatusNotFound, err.Error())
 		return
+	}
+
+	// Never return a negative balance on user balance inquiries
+	if balanceUnits < 0 {
+		balanceUnits = 0
 	}
 
 	balanceDecimal := float64(balanceUnits) / 1_000_000.0
