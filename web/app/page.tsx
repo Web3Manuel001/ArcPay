@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   LogOut,
   Lock,
-  PlusCircle,
+  Plus,
   CreditCard
 } from 'lucide-react';
 
@@ -39,9 +39,8 @@ export default function ArcpayApp() {
 
   // Financial State
   const [balanceUSD, setBalanceUSD] = useState<number>(0.00);
-  const [faucetLoading, setFaucetLoading] = useState(false);
 
-  // Deposit State
+  // Deposit State (Paystack Only)
   const [depositAmountNGN, setDepositAmountNGN] = useState('16500');
   const [depositLoading, setDepositLoading] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
@@ -79,7 +78,7 @@ export default function ArcpayApp() {
         setCurrentUser(u);
         fetchBalance(u.account_id);
 
-        // Check if returning from Paystack redirect
+        // Check if returning from Paystack redirect callback
         const params = new URLSearchParams(window.location.search);
         const ref = params.get('verify_ref') || params.get('reference');
         if (ref) {
@@ -106,7 +105,7 @@ export default function ArcpayApp() {
       const res = await fetch(`${API_BASE}/consumer/deposit/verify/${ref}`);
       const data = await res.json();
       if (data.success) {
-        alert(`🎉 Deposit Successful! Credited $${data.data.credited_usdc} USDC`);
+        alert(`🎉 Deposit Confirmed! Credited $${data.data.credited_usdc.toFixed(2)} USDC to your balance!`);
         fetchBalance(accountId);
         window.history.replaceState({}, document.title, window.location.pathname);
       }
@@ -154,37 +153,14 @@ export default function ArcpayApp() {
         })
       });
       if (data.success && data.data.authorization_url) {
-        // Redirect to Paystack Checkout Modal / URL
         window.location.href = data.data.authorization_url;
       } else {
-        alert(data.error || 'Failed to initialize deposit');
+        alert(data.error || 'Failed to initialize Paystack deposit');
       }
     } catch (err: any) {
       alert(err.message);
     } finally {
       setDepositLoading(false);
-    }
-  };
-
-  // Claim Faucet Test Money
-  const handleClaimFaucet = async () => {
-    if (!currentUser) return;
-    setFaucetLoading(true);
-    try {
-      const data = await apiCall('/consumer/faucet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tag: currentUser.arc_tag })
-      });
-      if (data.success) {
-        setBalanceUSD(data.data.new_balance);
-      } else {
-        alert(data.error || 'Failed to claim test money');
-      }
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setFaucetLoading(false);
     }
   };
 
@@ -223,7 +199,7 @@ export default function ArcpayApp() {
           setCurrentUser(data.data.user);
           localStorage.setItem('arcpay_user', JSON.stringify(data.data.user));
           setShowAuthModal(false);
-          fetchBalance(data.data.user.account_id);
+          setBalanceUSD(0.00); // Clean 0 balance on registration - must deposit via Paystack
         } else {
           alert(data.error || 'Registration failed');
         }
@@ -460,7 +436,7 @@ export default function ArcpayApp() {
         </div>
       )}
 
-      {/* DEPOSIT MODAL */}
+      {/* PAYSTACK DEPOSIT MODAL */}
       {showDepositModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface border border-surfaceBorder rounded-2xl w-full max-w-sm p-6 space-y-4">
@@ -486,14 +462,36 @@ export default function ArcpayApp() {
                   onChange={(e) => setDepositAmountNGN(e.target.value)}
                   className="mt-1 w-full bg-zinc-950 border border-surfaceBorder rounded-xl p-3 text-white focus:border-emerald-500/50"
                 />
-                <span className="text-[10px] text-emerald-400 mt-1 block">
-                  ≈ ${(parseFloat(depositAmountNGN || '0') / 1650).toFixed(2)} USDC credited
-                </span>
+              </div>
+
+              {/* Quick Select Buttons */}
+              <div className="grid grid-cols-3 gap-2">
+                {['5000', '16500', '50000'].map((amt) => (
+                  <button
+                    key={amt}
+                    onClick={() => setDepositAmountNGN(amt)}
+                    className={`py-1.5 rounded-lg border text-[11px] transition-colors ${
+                      depositAmountNGN === amt 
+                        ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400' 
+                        : 'bg-zinc-950 border-surfaceBorder text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    ₦{parseInt(amt).toLocaleString()}
+                  </button>
+                ))}
               </div>
 
               <div className="p-3 bg-zinc-950 rounded-xl border border-surfaceBorder text-[11px] text-zinc-400 space-y-1">
-                <div>⚡ Real sandbox payments (Card or Bank)</div>
-                <div>🔒 Funds settle directly into your Arcpay balance</div>
+                <div className="flex justify-between">
+                  <span>Rate:</span>
+                  <span className="text-white">$1.00 = ₦1,650</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>You Receive:</span>
+                  <span className="text-emerald-400 font-bold">
+                    ${(parseFloat(depositAmountNGN || '0') / 1650).toFixed(2)} USDC
+                  </span>
+                </div>
               </div>
 
               <button
@@ -502,7 +500,7 @@ export default function ArcpayApp() {
                 className="w-full bg-emerald-500 text-zinc-950 font-semibold py-3.5 rounded-xl text-xs flex items-center justify-center gap-2 hover:bg-emerald-400 transition-colors disabled:opacity-50"
               >
                 {depositLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CreditCard className="w-4 h-4" />}
-                <span>Continue to Paystack (₦{depositAmountNGN})</span>
+                <span>Proceed to Checkout</span>
               </button>
             </div>
           </div>
@@ -547,7 +545,7 @@ export default function ArcpayApp() {
           )}
         </div>
 
-        {/* Balance Card */}
+        {/* Balance Card (Paystack Only Deposit) */}
         <div className="mt-6 p-6 rounded-2xl bg-surface border border-surfaceBorder relative overflow-hidden">
           <div className="flex items-center justify-between text-xs font-mono text-zinc-400 uppercase tracking-wider">
             <span>Digital Dollar Balance</span>
@@ -564,25 +562,15 @@ export default function ArcpayApp() {
               <span className="text-xs font-mono text-emerald-400 font-medium">USDC</span>
             </div>
 
-            {/* Deposit Actions */}
+            {/* Clean Paystack Deposit Action */}
             {currentUser && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowDepositModal(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-white font-mono text-[11px] transition-colors"
-                >
-                  <CreditCard className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>+ Deposit NGN</span>
-                </button>
-                <button
-                  onClick={handleClaimFaucet}
-                  disabled={faucetLoading}
-                  className="p-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono text-[11px] transition-colors disabled:opacity-50"
-                  title="Claim $100 test USDC"
-                >
-                  {faucetLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <PlusCircle className="w-3.5 h-3.5" />}
-                </button>
-              </div>
+              <button
+                onClick={() => setShowDepositModal(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold font-mono text-xs rounded-xl transition-all shadow-sm"
+              >
+                <Plus className="w-4 h-4 stroke-[3]" />
+                <span>Add Money</span>
+              </button>
             )}
           </div>
 
