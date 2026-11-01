@@ -77,7 +77,7 @@ func (h *Handler) FaucetTopUp(w http.ResponseWriter, r *http.Request) {
 	faucetReserveID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
 	// Ensure system reserve exists
-	_ = h.ledgerService.CreateAccount(r.Context(), faucetReserveID, "GLOBAL", "USDC", ledger.Equity)
+	_, _ = h.ledgerService.CreateAccount(r.Context(), faucetReserveID, "GLOBAL", "USDC", ledger.Equity)
 
 	idempotencyKey := fmt.Sprintf("faucet_%s_%d", cleanTag, time.Now().UnixNano())
 	entry, err := h.ledgerService.ProcessTransaction(r.Context(), ledger.TransactionPayload{
